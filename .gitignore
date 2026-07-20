@@ -1,2 +1,19 @@
-rets_property.sql
-rets_openhouse.sql
+node_modules/
+.npm-cache/
+
+.env
+.env.local
+
+.DS_Store
+
+# Raw MLS data dumps downloaded per Week 1 instructions (hundreds of MB,
+# not source code) -- re-download via FileZilla rather than committing.
+/rets_property.sql
+/rets_openhouse.sql
+
+*.log
+
+# Local Claude Code tool permissions, not project config.
+.claude/settings.local.json
+
+SDE_Guide_Internship Final v.2.pdf

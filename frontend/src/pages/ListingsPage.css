@@ -1,0 +1,26 @@
+.listings-page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 16px 24px 48px;
+}
+
+.listings-page__count {
+  color: #555;
+  margin: 0 0 16px;
+}
+
+.listings-page__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 20px;
+}
+
+.listings-page__status {
+  text-align: center;
+  padding: 64px 16px;
+  color: #555;
+}
+
+.listings-page__status--error {
+  color: #b00020;
+}

@@ -4,7 +4,7 @@
   "description": "Express backend for IDX Exchange",
   "main": "server.js",
   "scripts": {
-    "dev": "nodemon --legacy-watch --watch server.js --watch db --ext js,json server.js",
+    "dev": "nodemon --legacy-watch --watch server.js --watch db --watch routes --ext js,json server.js",
     "start": "node server.js"
   },
   "keywords": [],
