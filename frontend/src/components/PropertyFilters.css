@@ -1,0 +1,52 @@
+.property-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px 16px;
+  align-items: end;
+  padding: 16px;
+  margin-bottom: 20px;
+  border: 1px solid #e2e2e2;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.property-filters__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+}
+
+.property-filters__field label {
+  font-size: 0.8rem;
+  color: #555;
+}
+
+.property-filters__field input,
+.property-filters__field select {
+  padding: 8px;
+  font: inherit;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.property-filters__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.property-filters__button {
+  padding: 9px 16px;
+  font: inherit;
+  color: #fff;
+  background: #1a73e8;
+  border: 1px solid #1a73e8;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.property-filters__button--secondary {
+  color: #1a73e8;
+  background: #fff;
+}
