@@ -2,14 +2,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchProperties } from "../api/client";
 import PropertyCard from "../components/PropertyCard";
 import PropertyFilters from "../components/PropertyFilters";
+import PropertySort from "../components/PropertySort";
 import Pagination from "../components/Pagination";
 import "./ListingsPage.css";
 
 const NO_FILTERS = {};
+const NO_SORT = { sortBy: "", sortOrder: "" };
 const ITEMS_PER_PAGE = 20;
 
 function ListingsPage() {
   const [filters, setFilters] = useState(NO_FILTERS);
+  const [sort, setSort] = useState(NO_SORT);
   const [currentPage, setCurrentPage] = useState(1);
   const [properties, setProperties] = useState([]);
   const [total, setTotal] = useState(0);
@@ -30,8 +33,9 @@ function ListingsPage() {
     setError(null);
 
     const offset = (currentPage - 1) * ITEMS_PER_PAGE;
+    const sortParams = sort.sortBy ? { sortBy: sort.sortBy, sortOrder: sort.sortOrder } : {};
 
-    fetchProperties({ ...filters, limit: ITEMS_PER_PAGE, offset })
+    fetchProperties({ ...filters, ...sortParams, limit: ITEMS_PER_PAGE, offset })
       .then((data) => {
         if (isStale()) return;
         setProperties(data.results);
@@ -47,15 +51,22 @@ function ListingsPage() {
         if (isStale()) return;
         setIsLoading(false);
       });
-  }, [filters, currentPage]);
+  }, [filters, sort, currentPage]);
 
   const handleSearch = useCallback((nextFilters) => {
     setFilters(nextFilters);
+    setSort(NO_SORT);
     setCurrentPage(1);
   }, []);
 
   const handleClear = useCallback(() => {
     setFilters(NO_FILTERS);
+    setSort(NO_SORT);
+    setCurrentPage(1);
+  }, []);
+
+  const handleSortChange = useCallback((sortBy, sortOrder) => {
+    setSort({ sortBy, sortOrder });
     setCurrentPage(1);
   }, []);
 
@@ -67,6 +78,7 @@ function ListingsPage() {
   return (
     <div className="listings-page">
       <PropertyFilters onSearch={handleSearch} onClear={handleClear} />
+      <PropertySort sortBy={sort.sortBy} sortOrder={sort.sortOrder} onChange={handleSortChange} />
       {renderResults({
         isLoading,
         error,

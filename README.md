@@ -578,3 +578,103 @@ New suites: `utils/photos.test.js`, `utils/openHouse.test.js`,
 `components/OpenHouseList.test.js`, and `pages/PropertyDetailPage.test.js`
 (routing, both fetches, the invalid-id error path, and the two debug
 challenges above).
+
+# Week 9 - Sorting
+
+## Overview
+
+`GET /api/properties` accepts `sortBy` and `sortOrder` alongside the existing
+filters. The listings page adds a single "Sort by" dropdown
+(`components/PropertySort.js`) with paired options — Price, Date Listed,
+Square Footage, Beds, each Low-to-High/High-to-Low or equivalent.
+
+## Backend: the whitelist has to be real column names
+
+`routes/properties.js` interpolates `sortBy` directly into the `ORDER BY`
+clause — column names can't be bound as query placeholders the way values
+can. That makes `SORTABLE_COLUMNS` the only thing standing between the query
+string and SQL injection, which is why it has to be the literal
+`rets_property` columns and nothing friendlier:
+
+```js
+const SORTABLE_COLUMNS = new Set([
+  "L_SystemPrice",       // price
+  "ListingContractDate", // date listed
+  "LM_Int2_3",            // square footage
+  "L_Keyword2",           // beds
+]);
+```
+
+⚠ A RESO-style whitelist entry like `"ListPrice"` would pass a naive
+validator, get interpolated into `ORDER BY ListPrice`, and MySQL would throw
+an unknown-column error — or worse, if the naive validator just skipped
+unrecognized values instead of rejecting them, the query would silently fall
+back to `ORDER BY id` and the response would look fine while being unsorted.
+`sortBy=L_SystemPrice` is what actually sorts by price; `sortBy=ListPrice` is
+rejected with `400`.
+
+`sortOrder` is checked against `{"asc", "desc"}` (case-insensitive) with the
+same reasoning. Both checks run alongside the other query-parameter
+validation already in the handler, before the `400` short-circuit — so an
+invalid `sortBy` or `sortOrder` never reaches query construction.
+
+When a sort is requested, the `ORDER BY` clause appends `, id ASC` as a
+tiebreaker:
+
+```js
+const orderByClause =
+  sortBy !== undefined ? `ORDER BY ${sortBy} ${sortOrder ?? "asc"}, id ASC` : "ORDER BY id";
+```
+
+Without it, rows tied on the sort column (thousands of listings share a
+`L_SystemPrice`) have no guaranteed order between two paginated requests —
+the same row could appear on both page 1 and page 2, or neither, depending on
+how MySQL happens to resolve the tie that time. `id` is a primary key, so it
+breaks every tie the same way on every request.
+
+Verified directly against the running database:
+
+```bash
+curl "http://127.0.0.1:5000/api/properties?limit=5&sortBy=L_SystemPrice&sortOrder=asc"
+curl "http://127.0.0.1:5000/api/properties?sortBy=ListPrice"   # 400, real column required
+curl "http://127.0.0.1:5000/api/properties?sortBy=id;DROP%20TABLE%20rets_property;--"  # 400
+```
+
+The injection attempt is rejected by the same whitelist check as any other
+invalid value — it never gets close to the query.
+
+## Frontend: sort vs. filter state
+
+`pages/ListingsPage.js` keeps `sort` (`{ sortBy, sortOrder }`) as its own
+piece of state, separate from `filters` — they have different reset rules
+and conflating them would make either rule leak into the other:
+
+- Changing pages leaves `sort` untouched — it's in the fetch effect's
+  dependency array alongside `filters` and `currentPage`, so paging fetches
+  the next offset with the same sort still applied.
+- Submitting a search or clicking Clear Filters resets `sort` to
+  `{ sortBy: "", sortOrder: "" }` in the same handler that resets
+  `filters`/`currentPage`, so React batches all three into one fetch rather
+  than firing twice.
+- Picking a new sort resets `currentPage` to 1 (not `filters`), so a re-sort
+  doesn't strand the user on a page number that may no longer exist for the
+  new order.
+
+`PropertySort`'s options carry both pieces at once (`value="L_SystemPrice:asc"`)
+so "Price: Low to High" and "Price: High to Low" are just two different
+selections of the same field rather than needing a second control to combine
+with.
+
+## Tests
+
+Backend: no test framework is set up for it yet (see Week 1-4, verified by
+`curl` against the running server, same as above) — 400s on an invalid
+`sortBy`/`sortOrder`, correct ordering for all four fields in both
+directions, and no `L_ListingID` overlap between two consecutive pages of a
+sorted, paginated request.
+
+Frontend: `components/PropertySort.test.js` (every option maps to the right
+`sortBy`/`sortOrder` pair, Default clears both) and a new `sorting` suite in
+`pages/ListingsPage.test.js` (sort included in the fetch params, persists
+across a page change, resets `currentPage` to 1 when the sort changes, and
+resets to Default on both search and Clear Filters).

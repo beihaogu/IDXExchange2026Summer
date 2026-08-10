@@ -1,0 +1,19 @@
+.property-sort {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.property-sort label {
+  font-size: 0.85rem;
+  color: #555;
+}
+
+.property-sort select {
+  padding: 8px;
+  font: inherit;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+}

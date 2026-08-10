@@ -294,4 +294,139 @@ describe("ListingsPage", () => {
       expect(screen.queryByRole("navigation", { name: /pagination/i })).not.toBeInTheDocument();
     });
   });
+
+  describe("sorting", () => {
+    function chooseSort(optionValue) {
+      userEvent.selectOptions(screen.getByLabelText(/sort by/i), optionValue);
+    }
+
+    it("sends the real column name and order once a sort option is chosen", async () => {
+      fetchProperties.mockResolvedValue(payload([property("1", "1 Oak St", "Portland")]));
+
+      renderPage();
+      await screen.findByText("1 Oak St");
+
+      chooseSort("L_SystemPrice:asc");
+
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({
+          sortBy: "L_SystemPrice",
+          sortOrder: "asc",
+          limit: 20,
+          offset: 0,
+        })
+      );
+    });
+
+    it("sends no sortBy/sortOrder at all while Default is selected", async () => {
+      fetchProperties.mockResolvedValue(payload([property("1", "1 Oak St", "Portland")]));
+
+      renderPage();
+      await screen.findByText("1 Oak St");
+
+      expect(fetchProperties).toHaveBeenLastCalledWith(
+        expect.not.objectContaining({ sortBy: expect.anything() })
+      );
+    });
+
+    it("persists the chosen sort across a page change", async () => {
+      fetchProperties.mockResolvedValue(payload(pageOfProperties(1), 45));
+      window.scrollTo = jest.fn();
+
+      renderPage();
+      await screen.findByText("Property 1-0");
+
+      chooseSort("LM_Int2_3:desc");
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({
+          sortBy: "LM_Int2_3",
+          sortOrder: "desc",
+          limit: 20,
+          offset: 0,
+        })
+      );
+
+      userEvent.click(screen.getByRole("button", { name: "2" }));
+
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({
+          sortBy: "LM_Int2_3",
+          sortOrder: "desc",
+          limit: 20,
+          offset: 20,
+        })
+      );
+    });
+
+    it("resets to page 1 when the sort changes from a later page", async () => {
+      fetchProperties.mockResolvedValue(payload(pageOfProperties(1), 45));
+      window.scrollTo = jest.fn();
+
+      renderPage();
+      await screen.findByText("Property 1-0");
+
+      userEvent.click(screen.getByRole("button", { name: "3" }));
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({ limit: 20, offset: 40 })
+      );
+
+      chooseSort("L_Keyword2:asc");
+
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({
+          sortBy: "L_Keyword2",
+          sortOrder: "asc",
+          limit: 20,
+          offset: 0,
+        })
+      );
+    });
+
+    it("resets the sort back to Default when a new search is applied", async () => {
+      fetchProperties.mockResolvedValue(payload([property("1", "1 Oak St", "Portland")]));
+
+      renderPage();
+      await screen.findByText("1 Oak St");
+
+      chooseSort("L_SystemPrice:desc");
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sortBy: "L_SystemPrice" })
+        )
+      );
+
+      userEvent.type(screen.getByLabelText(/city/i), "Seattle");
+      search();
+
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({
+          city: "Seattle",
+          limit: 20,
+          offset: 0,
+        })
+      );
+      expect(screen.getByLabelText(/sort by/i)).toHaveValue("");
+    });
+
+    it("resets the sort back to Default when filters are cleared", async () => {
+      fetchProperties.mockResolvedValue(payload([property("1", "1 Oak St", "Portland")]));
+
+      renderPage();
+      await screen.findByText("1 Oak St");
+
+      chooseSort("ListingContractDate:asc");
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sortBy: "ListingContractDate" })
+        )
+      );
+
+      clear();
+
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({ limit: 20, offset: 0 })
+      );
+      expect(screen.getByLabelText(/sort by/i)).toHaveValue("");
+    });
+  });
 });
