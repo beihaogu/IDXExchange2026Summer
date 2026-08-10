@@ -1,6 +1,8 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import ListingsPage from "./ListingsPage";
+import { ROUTER_FUTURE_FLAGS } from "../App";
 import { fetchProperties } from "../api/client";
 
 // The page is tested against a mocked client rather than a mocked fetch(): the
@@ -8,6 +10,14 @@ import { fetchProperties } from "../api/client";
 // this seam lets each request's resolution be controlled individually, which is
 // what the out-of-order test below needs.
 jest.mock("../api/client");
+
+// PropertyCard renders a react-router Link, which throws outside a Router.
+function renderPage() {
+  const wrapper = ({ children }) => (
+    <MemoryRouter future={ROUTER_FUTURE_FLAGS}>{children}</MemoryRouter>
+  );
+  return render(<ListingsPage />, { wrapper });
+}
 
 function deferred() {
   let resolve;
@@ -71,7 +81,7 @@ describe("ListingsPage", () => {
   it("loads every property with no filters on first render", async () => {
     fetchProperties.mockResolvedValue(payload([property("1", "1 Oak St", "Portland")]));
 
-    render(<ListingsPage />);
+    renderPage();
     expect(screen.getByText(/loading properties/i)).toBeInTheDocument();
 
     expect(await screen.findByText("1 Oak St")).toBeInTheDocument();
@@ -81,7 +91,7 @@ describe("ListingsPage", () => {
   it("sends only the non-empty filters when the form is submitted", async () => {
     fetchProperties.mockResolvedValue(payload([property("1", "1 Oak St", "Portland")]));
 
-    render(<ListingsPage />);
+    renderPage();
     await screen.findByText("1 Oak St");
 
     userEvent.type(screen.getByLabelText(/city/i), "Portland");
@@ -100,7 +110,7 @@ describe("ListingsPage", () => {
   it("shows a helpful message when a search matches nothing", async () => {
     fetchProperties.mockResolvedValue(payload([]));
 
-    render(<ListingsPage />);
+    renderPage();
 
     expect(await screen.findByText(/no properties found/i)).toBeInTheDocument();
   });
@@ -108,7 +118,7 @@ describe("ListingsPage", () => {
   it("reloads the unfiltered list when Clear Filters is clicked", async () => {
     fetchProperties.mockResolvedValue(payload([property("1", "1 Oak St", "Portland")]));
 
-    render(<ListingsPage />);
+    renderPage();
     await screen.findByText("1 Oak St");
 
     userEvent.type(screen.getByLabelText(/city/i), "Portland");
@@ -123,7 +133,7 @@ describe("ListingsPage", () => {
   it("shows the error message when the request fails", async () => {
     fetchProperties.mockRejectedValue(new Error("Unable to reach the server."));
 
-    render(<ListingsPage />);
+    renderPage();
 
     expect(await screen.findByText("Unable to reach the server.")).toBeInTheDocument();
   });
@@ -134,7 +144,7 @@ describe("ListingsPage", () => {
   it("never renders a stale response that resolves after a newer request", async () => {
     const pending = queueDeferredResponses();
 
-    render(<ListingsPage />);
+    renderPage();
     await settle(pending[0], payload([property("1", "1 Oak St", "Portland")]));
 
     userEvent.type(screen.getByLabelText(/city/i), "Portland");

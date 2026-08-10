@@ -13,6 +13,10 @@ node_modules/
 
 *.log
 
+# Local manual dev-start helper script and its logs, not project source.
+dev-up.sh
+logs/
+
 # Local Claude Code tool permissions, not project config.
 .claude/settings.local.json
 

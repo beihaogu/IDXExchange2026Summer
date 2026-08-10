@@ -28,3 +28,35 @@ export async function fetchProperties(params = {}) {
 
   return response.json();
 }
+
+export async function fetchProperty(id) {
+  let response;
+  try {
+    response = await fetch(`${API_BASE_URL}/properties/${encodeURIComponent(id)}`);
+  } catch {
+    throw new Error("Unable to reach the server. Is the backend running?");
+  }
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.error || `Failed to fetch property (HTTP ${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function fetchOpenHouses(id) {
+  let response;
+  try {
+    response = await fetch(`${API_BASE_URL}/properties/${encodeURIComponent(id)}/openhouses`);
+  } catch {
+    throw new Error("Unable to reach the server. Is the backend running?");
+  }
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.error || `Failed to fetch open houses (HTTP ${response.status})`);
+  }
+
+  return response.json();
+}
