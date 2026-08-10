@@ -1,0 +1,36 @@
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 24px;
+}
+
+.pagination__nav,
+.pagination__page {
+  padding: 8px 12px;
+  font: inherit;
+  color: #1a73e8;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.pagination__nav:disabled {
+  color: #999;
+  border-color: #e2e2e2;
+  cursor: not-allowed;
+}
+
+.pagination__page--active {
+  color: #fff;
+  background: #1a73e8;
+  border-color: #1a73e8;
+  cursor: default;
+}
+
+.pagination__ellipsis {
+  padding: 0 4px;
+  color: #666;
+}

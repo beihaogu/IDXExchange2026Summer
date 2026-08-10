@@ -392,6 +392,76 @@ running backend and a populated database, turning it slow and flaky. And error
 paths — a 500, malformed JSON, a dropped connection — are trivial to produce
 from a mock and nearly impossible to trigger on demand against a real server.
 
+# Week 7 - Pagination
+
+## Overview
+
+`ListingsPage` fetches 20 properties (`ITEMS_PER_PAGE` in
+`pages/ListingsPage.js`) at a time and adds a `Pagination` component below
+the grid. `currentPage` state drives `offset = (currentPage - 1) * 20`, sent
+alongside the existing filters and `limit` on every request.
+
+## Behaviour
+
+- Changing pages sends the new `offset` with the *current* filters still
+  attached, and scrolls to top (`window.scrollTo(0, 0)`).
+- Submitting a search or clicking Clear Filters resets `currentPage` to `1`
+  — both `setFilters` and `setCurrentPage(1)` happen in the same handler, so
+  React batches them into the single fetch the new filters need, not two.
+- The results line reads "Showing X-Y of Z properties", computed from
+  `currentPage`, `ITEMS_PER_PAGE`, and the count of properties actually
+  returned (so a partial last page doesn't overstate Y).
+- `Pagination` renders nothing when `totalPages <= 1` — there's nothing to
+  page through and no controls to disable correctly anyway.
+
+## Page number generation (`utils/pagination.js`)
+
+`getPageNumbers(currentPage, totalPages)` always keeps the list format
+`first … [siblings] … last`, with one of the four shapes:
+
+- **fits without ellipsis** — `totalPages` is small enough (`≤ 7` with the
+  default `siblingCount`) that the full list is shorter than a truncated one
+  would be, so nothing is hidden: `[1, 2, 3, 4, 5]`.
+- **near the start** — `[1, 2, 3, 4, 5, …, 24]`.
+- **near the end** — `[1, …, 20, 21, 22, 23, 24]`.
+- **in the middle** — `[1, …, 4, 5, 6, …, 24]`.
+
+An ellipsis is only shown when it hides more than one page — page 2 sitting
+between 1 and 3 is printed, not collapsed into a gap the same width as the
+number it would replace.
+
+## Debug Challenge: "1 … 22 23 24 24" — the last page twice
+
+**Symptom.** Near the end of a large result set, the bar showed the last page
+number twice: `1 … 22 23 24 24`.
+
+**Cause.** The "near the end" branch built its trailing block with
+`range(totalPages - edgeBlockSize + 1, totalPages)` — which already ends in
+`totalPages` — and then appended `totalPages` again after it, on the
+assumption (true for the *other* branches) that the edge value always needed
+adding separately.
+
+**Fix.** `utils/pagination.js` builds that branch as
+`[1, ELLIPSIS, ...range(totalPages - edgeBlockSize + 1, totalPages)]` with no
+trailing append. `utils/pagination.test.js`'s
+`"never repeats a page number, on any page of any size"` test reproduces it:
+it walks every `(currentPage, totalPages)` pair across five different list
+sizes and asserts the numeric pages returned are already a set. Re-adding the
+duplicate append fails that test immediately.
+
+## Tests
+
+`utils/pagination.test.js` covers the four page-number shapes, the
+one-page/zero-page edge cases, the never-repeats regression above, and that
+the current page and both list ends stay present and stable-width across
+every page of a 24-page run. `components/Pagination.test.js` covers Previous/
+Next disabled state on the first and last page, clicking a page number,
+`aria-current` on the active page, the rendered ellipsis, and the "hidden at
+one page" case. `pages/ListingsPage.test.js` adds a `pagination` suite:
+result range text, requesting the right offset on page click, scrolling to
+top, filters surviving a page change, and both search and Clear resetting
+back to page 1 from a later page.
+
 # Week 8 - Property Detail Page, Photos & Map
 
 ## Overview
