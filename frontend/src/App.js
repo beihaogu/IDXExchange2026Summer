@@ -1,4 +1,5 @@
-import { BrowserRouter, Routes, Route, Link } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Link, useLocation } from "react-router-dom";
+import ErrorBoundary from "./components/ErrorBoundary";
 import ListingsPage from "./pages/ListingsPage";
 import PropertyDetailPage from "./pages/PropertyDetailPage";
 import "./App.css";
@@ -9,6 +10,24 @@ export const ROUTER_FUTURE_FLAGS = {
   v7_startTransition: true,
   v7_relativeSplatPath: true,
 };
+
+// The boundary sits inside the router, below the header, so a crashed page
+// still leaves the site title and a way back. Keying it on the pathname
+// remounts it on navigation -- without that, a boundary tripped on the detail
+// page would keep showing its fallback after the user navigated home, since
+// error state survives re-renders.
+function RoutedContent() {
+  const { pathname } = useLocation();
+
+  return (
+    <ErrorBoundary key={pathname}>
+      <Routes>
+        <Route path="/" element={<ListingsPage />} />
+        <Route path="/property/:id" element={<PropertyDetailPage />} />
+      </Routes>
+    </ErrorBoundary>
+  );
+}
 
 function App() {
   return (
@@ -22,10 +41,7 @@ function App() {
           </h1>
         </header>
         <main>
-          <Routes>
-            <Route path="/" element={<ListingsPage />} />
-            <Route path="/property/:id" element={<PropertyDetailPage />} />
-          </Routes>
+          <RoutedContent />
         </main>
       </div>
     </BrowserRouter>

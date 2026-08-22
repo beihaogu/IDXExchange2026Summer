@@ -678,3 +678,188 @@ Frontend: `components/PropertySort.test.js` (every option maps to the right
 `pages/ListingsPage.test.js` (sort included in the fetch params, persists
 across a page change, resets `currentPage` to 1 when the sort changes, and
 resets to Default on both search and Clear Filters).
+
+# Week 9 - Performance Optimization
+
+## Reading EXPLAIN
+
+`EXPLAIN` prefixed to a `SELECT` makes MySQL return its **execution plan**
+instead of running the query — which index it intends to use, how many rows it
+expects to touch, and whether it has to sort the result itself.
+`EXPLAIN ANALYZE` goes further: it actually runs the query and reports the real
+time spent at each step, which is what the before/after numbers below come from.
+
+The query profiled here is the most complex one the app can produce — all four
+filters plus a sort plus pagination:
+
+```sql
+EXPLAIN SELECT L_ListingID, L_Address, L_City, L_SystemPrice, L_Keyword2, LM_Dec_3, LM_Int2_3
+FROM rets_property
+WHERE LOWER(TRIM(L_City)) = LOWER(TRIM('Beverly Hills'))
+  AND L_SystemPrice >= 500000 AND L_SystemPrice <= 5000000
+  AND L_Keyword2 >= 3 AND LM_Dec_3 >= 2
+ORDER BY L_SystemPrice ASC, id ASC
+LIMIT 20 OFFSET 0;
+```
+
+Before any index existed on the filter columns:
+
+```
+           id: 1
+  select_type: SIMPLE
+        table: rets_property
+   partitions: NULL
+         type: ALL
+possible_keys: NULL
+          key: NULL
+      key_len: NULL
+          ref: NULL
+         rows: 35353
+     filtered: 1.23
+        Extra: Using where; Using filesort
+```
+
+What each column means, and what this row is saying:
+
+| Column | Meaning | Reading above |
+| --- | --- | --- |
+| `id` | Which `SELECT` in the statement this row describes | `1` — a single, non-nested query |
+| `select_type` | The role of that `SELECT` (subquery, union, derived table…) | `SIMPLE` — no subqueries or unions |
+| `table` | The table this row is about | `rets_property` |
+| `partitions` | Partitions that will be searched | `NULL` — the table isn't partitioned |
+| `type` | **The access method.** Worst to best: `ALL` (read every row) → `index` (read the whole index) → `range` (walk a slice of an index) → `ref` → `eq_ref` → `const` | `ALL` — a full table scan |
+| `possible_keys` | Indexes the optimizer *could* have used | `NULL` — none exist for these columns |
+| `key` | The index actually chosen | `NULL` — no index used |
+| `key_len` | Bytes of the index used. On a composite index this reveals **how many leading columns** are in play | `NULL` |
+| `ref` | What the indexed column is compared against (a constant, another column…) | `NULL` |
+| `rows` | Estimated rows MySQL will examine | `35353` — most of the 53,122-row table |
+| `filtered` | Estimated % of those rows surviving `WHERE` | `1.23` — 35353 × 1.23% ≈ 435 rows expected out |
+| `Extra` | Everything else. `Using where` = rows are filtered after being read; `Using index` = covering index, no table lookup needed; **`Using filesort`** = the `ORDER BY` can't be served by an index, so the whole result set is sorted separately; `Using temporary` = an internal temp table is built | `Using where; Using filesort` — both of the slow ones |
+
+`EXPLAIN ANALYZE` confirmed the estimate: a table scan of all 53,122 rows,
+**557 ms**, to return 20 listings.
+
+## Composite indexes
+
+Two indexes carry this query (see `backend/db/indexes.sql`):
+
+`idx_city_price` — a **functional composite** on
+`((LOWER(TRIM(L_City))), L_SystemPrice)`. It has to be built on the expression,
+not the bare column: once the query wraps `L_City` in `LOWER(TRIM(...))`, a
+plain index on `L_City` is unusable, because the optimizer has no way to know
+the function preserves ordering. The column order matters too — city is an
+equality match and price is a range, and a composite index can only use a range
+on its *last* referenced column, so `(city, price)` works while `(price, city)`
+would stop at the price range.
+
+The same index also serves the `ORDER BY`: rows for one city are already stored
+in price order inside it, so there is nothing left to sort.
+
+After adding it:
+
+```
+         type: range
+possible_keys: idx_L_SystemPrice,idx_L_Keyword2,idx_LM_Dec_3,idx_city_price
+          key: idx_city_price
+      key_len: 208
+          ref: NULL
+         rows: 116
+     filtered: 25.00
+        Extra: Using where
+```
+
+`type` went `ALL` → `range`, `key` is no longer `NULL`, `rows` fell from 35,353
+to 116, and `Using filesort` is gone. `EXPLAIN ANALYZE`: **557 ms → 4.3 ms**,
+roughly a **130×** improvement.
+
+## The DESC sort was still doing a filesort
+
+An unfiltered sort — what the listings page issues when the user picks a sort
+with no filters — told a different story. `ORDER BY L_SystemPrice ASC, id ASC`
+was an index scan (0.9 ms), but `ORDER BY L_SystemPrice DESC, id ASC` was a full
+scan plus filesort (**634 ms**), *despite* `idx_L_SystemPrice` existing.
+
+The reason is that InnoDB appends the primary key to every secondary index, so
+`idx_L_SystemPrice` is physically `(L_SystemPrice, id)`, both ascending. MySQL
+can read any index forwards or backwards, which covers `price ASC, id ASC` and
+`price DESC, id DESC` — but `price DESC, id ASC` matches neither direction, so
+the optimizer abandons the index and sorts all 53k rows.
+
+The fix was in the query, not the schema: `routes/properties.js` now makes the
+`id` tiebreaker follow `sortOrder` instead of pinning it to `ASC`.
+
+```js
+const resolvedOrder = sortOrder ?? "asc";
+`ORDER BY ${sortBy} ${resolvedOrder}, id ${resolvedOrder}`
+```
+
+`id` is unique, so this is exactly as deterministic for pagination as `id ASC`
+was — verified again by checking that two consecutive pages of a
+`sortOrder=desc` request share no `L_ListingID`. The plan becomes a reverse
+index scan: **634 ms → 2.8 ms**.
+
+Two more indexes (`idx_ListingContractDate`, `idx_LM_Int2_3`) cover the sort
+columns that weren't already indexed as filter columns. With those, all eight
+combinations the sort dropdown can produce run as index scans — the slowest is
+0.8 ms. Without the tiebreaker fix this would have needed eight indexes, four of
+them explicitly `DESC`.
+
+| Sort | Before | After |
+| --- | --- | --- |
+| 4 filters + price ASC | 557 ms, filesort | 4.3 ms, `range` on `idx_city_price` |
+| price DESC (no filter) | 634 ms, filesort | 2.8 ms, reverse index scan |
+| date listed DESC | 520 ms, filesort | 0.19 ms, reverse index scan |
+| square footage DESC | 643 ms, filesort | 0.81 ms, reverse index scan |
+| beds DESC | 619 ms, filesort | 0.48 ms, reverse index scan |
+
+Note: `backend/db/indexes.sql` is not run automatically. Re-importing
+`rets_property.sql` drops these indexes with the table, and the symptom is
+exactly the "before" column above.
+
+## Request timing
+
+The logging middleware in `server.js` brackets each request with
+`process.hrtime.bigint()` (nanosecond resolution, unaffected by wall-clock
+adjustments) and logs on the response's `finish` event, so the number covers the
+full handler including the database round trip:
+
+```
+[2026-08-17T06:28:15.412Z] GET /api/properties?city=Beverly+Hills&sortBy=L_SystemPrice 200 5.8ms
+```
+
+## Error boundary
+
+`components/ErrorBoundary.js` wraps the routed content in `App.js`. It has to be
+a class component — `componentDidCatch` has no hook equivalent.
+
+- `getDerivedStateFromError` runs in the render phase and only swaps in the
+  fallback UI; it must stay pure, so logging lives in `componentDidCatch`.
+- The fallback offers **Try again** (clears the error state and re-renders the
+  children, which recovers from transient failures without losing the SPA) and
+  **Reload page** as the fallback of the fallback.
+- The boundary is keyed on `location.pathname`. Error state survives re-renders,
+  so without the key a boundary tripped on the detail page would keep showing
+  its fallback after the user navigated home.
+
+It catches errors thrown during render, in lifecycle methods, and in
+constructors. It does **not** catch errors in event handlers, in async code, or
+during server rendering — the `fetch` failures in `ListingsPage` are still
+handled by their own `try`/`catch`, and the two mechanisms are complementary
+rather than redundant.
+
+Tested in `components/ErrorBoundary.test.js`: children render normally when
+nothing throws, the fallback replaces them when something does, the error is
+logged, and **Try again** restores the children.
+
+## Console warnings
+
+`npm run build` compiles with no ESLint warnings, and the 114-test suite runs
+without React warnings in its output. The two sources that had been noisy are
+already handled: `App.js` opts into `v7_startTransition` and
+`v7_relativeSplatPath` so react-router v6 stops warning about v7 behaviour
+changes, and every list render supplies a `key`.
+
+The `DeprecationWarning` lines in `logs/frontend.log` (`fs.F_OK`,
+`onAfterSetupMiddleware`, `util._extend`) come from webpack-dev-server's own
+Node dependencies, not from application code — they are not fixable from this
+repo and do not appear in the browser console.
