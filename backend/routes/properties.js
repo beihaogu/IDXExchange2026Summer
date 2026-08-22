@@ -172,11 +172,23 @@ router.get("/", async (req, res) => {
 
   // sortBy/sortOrder are already confirmed to be exact matches against
   // SORTABLE_COLUMNS / SORT_ORDERS above, so interpolating them here doesn't
-  // open an injection path. `id ASC` breaks ties deterministically -- without
-  // it, rows with an equal sort value could reorder between page 1 and page 2
-  // of the same request, duplicating or skipping listings across pagination.
+  // open an injection path. `id` breaks ties deterministically -- without it,
+  // rows with an equal sort value could reorder between page 1 and page 2 of
+  // the same request, duplicating or skipping listings across pagination.
+  //
+  // The tiebreaker follows the sort direction rather than always being ASC.
+  // InnoDB appends the primary key to every secondary index, so
+  // idx_L_SystemPrice is physically (L_SystemPrice, id) ascending. MySQL can
+  // read that index forwards or backwards, but "L_SystemPrice DESC, id ASC"
+  // matches neither direction -- the optimizer gives up on the index and
+  // falls back to sorting the whole result set (EXPLAIN: Using filesort,
+  // 53k rows, ~630ms). "L_SystemPrice DESC, id DESC" is a plain reverse scan
+  // (~2ms) and is just as deterministic, since id is unique.
+  const resolvedOrder = sortOrder ?? "asc";
   const orderByClause =
-    sortBy !== undefined ? `ORDER BY ${sortBy} ${sortOrder ?? "asc"}, id ASC` : "ORDER BY id";
+    sortBy !== undefined
+      ? `ORDER BY ${sortBy} ${resolvedOrder}, id ${resolvedOrder}`
+      : "ORDER BY id";
 
   try {
     const [countRows] = await pool.query(
