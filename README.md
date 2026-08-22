@@ -392,6 +392,76 @@ running backend and a populated database, turning it slow and flaky. And error
 paths — a 500, malformed JSON, a dropped connection — are trivial to produce
 from a mock and nearly impossible to trigger on demand against a real server.
 
+# Week 7 - Pagination
+
+## Overview
+
+`ListingsPage` fetches 20 properties (`ITEMS_PER_PAGE` in
+`pages/ListingsPage.js`) at a time and adds a `Pagination` component below
+the grid. `currentPage` state drives `offset = (currentPage - 1) * 20`, sent
+alongside the existing filters and `limit` on every request.
+
+## Behaviour
+
+- Changing pages sends the new `offset` with the *current* filters still
+  attached, and scrolls to top (`window.scrollTo(0, 0)`).
+- Submitting a search or clicking Clear Filters resets `currentPage` to `1`
+  — both `setFilters` and `setCurrentPage(1)` happen in the same handler, so
+  React batches them into the single fetch the new filters need, not two.
+- The results line reads "Showing X-Y of Z properties", computed from
+  `currentPage`, `ITEMS_PER_PAGE`, and the count of properties actually
+  returned (so a partial last page doesn't overstate Y).
+- `Pagination` renders nothing when `totalPages <= 1` — there's nothing to
+  page through and no controls to disable correctly anyway.
+
+## Page number generation (`utils/pagination.js`)
+
+`getPageNumbers(currentPage, totalPages)` always keeps the list format
+`first … [siblings] … last`, with one of the four shapes:
+
+- **fits without ellipsis** — `totalPages` is small enough (`≤ 7` with the
+  default `siblingCount`) that the full list is shorter than a truncated one
+  would be, so nothing is hidden: `[1, 2, 3, 4, 5]`.
+- **near the start** — `[1, 2, 3, 4, 5, …, 24]`.
+- **near the end** — `[1, …, 20, 21, 22, 23, 24]`.
+- **in the middle** — `[1, …, 4, 5, 6, …, 24]`.
+
+An ellipsis is only shown when it hides more than one page — page 2 sitting
+between 1 and 3 is printed, not collapsed into a gap the same width as the
+number it would replace.
+
+## Debug Challenge: "1 … 22 23 24 24" — the last page twice
+
+**Symptom.** Near the end of a large result set, the bar showed the last page
+number twice: `1 … 22 23 24 24`.
+
+**Cause.** The "near the end" branch built its trailing block with
+`range(totalPages - edgeBlockSize + 1, totalPages)` — which already ends in
+`totalPages` — and then appended `totalPages` again after it, on the
+assumption (true for the *other* branches) that the edge value always needed
+adding separately.
+
+**Fix.** `utils/pagination.js` builds that branch as
+`[1, ELLIPSIS, ...range(totalPages - edgeBlockSize + 1, totalPages)]` with no
+trailing append. `utils/pagination.test.js`'s
+`"never repeats a page number, on any page of any size"` test reproduces it:
+it walks every `(currentPage, totalPages)` pair across five different list
+sizes and asserts the numeric pages returned are already a set. Re-adding the
+duplicate append fails that test immediately.
+
+## Tests
+
+`utils/pagination.test.js` covers the four page-number shapes, the
+one-page/zero-page edge cases, the never-repeats regression above, and that
+the current page and both list ends stay present and stable-width across
+every page of a 24-page run. `components/Pagination.test.js` covers Previous/
+Next disabled state on the first and last page, clicking a page number,
+`aria-current` on the active page, the rendered ellipsis, and the "hidden at
+one page" case. `pages/ListingsPage.test.js` adds a `pagination` suite:
+result range text, requesting the right offset on page click, scrolling to
+top, filters surviving a page change, and both search and Clear resetting
+back to page 1 from a later page.
+
 # Week 8 - Property Detail Page, Photos & Map
 
 ## Overview
@@ -508,3 +578,288 @@ New suites: `utils/photos.test.js`, `utils/openHouse.test.js`,
 `components/OpenHouseList.test.js`, and `pages/PropertyDetailPage.test.js`
 (routing, both fetches, the invalid-id error path, and the two debug
 challenges above).
+
+# Week 9 - Sorting
+
+## Overview
+
+`GET /api/properties` accepts `sortBy` and `sortOrder` alongside the existing
+filters. The listings page adds a single "Sort by" dropdown
+(`components/PropertySort.js`) with paired options — Price, Date Listed,
+Square Footage, Beds, each Low-to-High/High-to-Low or equivalent.
+
+## Backend: the whitelist has to be real column names
+
+`routes/properties.js` interpolates `sortBy` directly into the `ORDER BY`
+clause — column names can't be bound as query placeholders the way values
+can. That makes `SORTABLE_COLUMNS` the only thing standing between the query
+string and SQL injection, which is why it has to be the literal
+`rets_property` columns and nothing friendlier:
+
+```js
+const SORTABLE_COLUMNS = new Set([
+  "L_SystemPrice",       // price
+  "ListingContractDate", // date listed
+  "LM_Int2_3",            // square footage
+  "L_Keyword2",           // beds
+]);
+```
+
+⚠ A RESO-style whitelist entry like `"ListPrice"` would pass a naive
+validator, get interpolated into `ORDER BY ListPrice`, and MySQL would throw
+an unknown-column error — or worse, if the naive validator just skipped
+unrecognized values instead of rejecting them, the query would silently fall
+back to `ORDER BY id` and the response would look fine while being unsorted.
+`sortBy=L_SystemPrice` is what actually sorts by price; `sortBy=ListPrice` is
+rejected with `400`.
+
+`sortOrder` is checked against `{"asc", "desc"}` (case-insensitive) with the
+same reasoning. Both checks run alongside the other query-parameter
+validation already in the handler, before the `400` short-circuit — so an
+invalid `sortBy` or `sortOrder` never reaches query construction.
+
+When a sort is requested, the `ORDER BY` clause appends `, id ASC` as a
+tiebreaker:
+
+```js
+const orderByClause =
+  sortBy !== undefined ? `ORDER BY ${sortBy} ${sortOrder ?? "asc"}, id ASC` : "ORDER BY id";
+```
+
+Without it, rows tied on the sort column (thousands of listings share a
+`L_SystemPrice`) have no guaranteed order between two paginated requests —
+the same row could appear on both page 1 and page 2, or neither, depending on
+how MySQL happens to resolve the tie that time. `id` is a primary key, so it
+breaks every tie the same way on every request.
+
+Verified directly against the running database:
+
+```bash
+curl "http://127.0.0.1:5000/api/properties?limit=5&sortBy=L_SystemPrice&sortOrder=asc"
+curl "http://127.0.0.1:5000/api/properties?sortBy=ListPrice"   # 400, real column required
+curl "http://127.0.0.1:5000/api/properties?sortBy=id;DROP%20TABLE%20rets_property;--"  # 400
+```
+
+The injection attempt is rejected by the same whitelist check as any other
+invalid value — it never gets close to the query.
+
+## Frontend: sort vs. filter state
+
+`pages/ListingsPage.js` keeps `sort` (`{ sortBy, sortOrder }`) as its own
+piece of state, separate from `filters` — they have different reset rules
+and conflating them would make either rule leak into the other:
+
+- Changing pages leaves `sort` untouched — it's in the fetch effect's
+  dependency array alongside `filters` and `currentPage`, so paging fetches
+  the next offset with the same sort still applied.
+- Submitting a search or clicking Clear Filters resets `sort` to
+  `{ sortBy: "", sortOrder: "" }` in the same handler that resets
+  `filters`/`currentPage`, so React batches all three into one fetch rather
+  than firing twice.
+- Picking a new sort resets `currentPage` to 1 (not `filters`), so a re-sort
+  doesn't strand the user on a page number that may no longer exist for the
+  new order.
+
+`PropertySort`'s options carry both pieces at once (`value="L_SystemPrice:asc"`)
+so "Price: Low to High" and "Price: High to Low" are just two different
+selections of the same field rather than needing a second control to combine
+with.
+
+## Tests
+
+Backend: no test framework is set up for it yet (see Week 1-4, verified by
+`curl` against the running server, same as above) — 400s on an invalid
+`sortBy`/`sortOrder`, correct ordering for all four fields in both
+directions, and no `L_ListingID` overlap between two consecutive pages of a
+sorted, paginated request.
+
+Frontend: `components/PropertySort.test.js` (every option maps to the right
+`sortBy`/`sortOrder` pair, Default clears both) and a new `sorting` suite in
+`pages/ListingsPage.test.js` (sort included in the fetch params, persists
+across a page change, resets `currentPage` to 1 when the sort changes, and
+resets to Default on both search and Clear Filters).
+
+# Week 9 - Performance Optimization
+
+## Reading EXPLAIN
+
+`EXPLAIN` prefixed to a `SELECT` makes MySQL return its **execution plan**
+instead of running the query — which index it intends to use, how many rows it
+expects to touch, and whether it has to sort the result itself.
+`EXPLAIN ANALYZE` goes further: it actually runs the query and reports the real
+time spent at each step, which is what the before/after numbers below come from.
+
+The query profiled here is the most complex one the app can produce — all four
+filters plus a sort plus pagination:
+
+```sql
+EXPLAIN SELECT L_ListingID, L_Address, L_City, L_SystemPrice, L_Keyword2, LM_Dec_3, LM_Int2_3
+FROM rets_property
+WHERE LOWER(TRIM(L_City)) = LOWER(TRIM('Beverly Hills'))
+  AND L_SystemPrice >= 500000 AND L_SystemPrice <= 5000000
+  AND L_Keyword2 >= 3 AND LM_Dec_3 >= 2
+ORDER BY L_SystemPrice ASC, id ASC
+LIMIT 20 OFFSET 0;
+```
+
+Before any index existed on the filter columns:
+
+```
+           id: 1
+  select_type: SIMPLE
+        table: rets_property
+   partitions: NULL
+         type: ALL
+possible_keys: NULL
+          key: NULL
+      key_len: NULL
+          ref: NULL
+         rows: 35353
+     filtered: 1.23
+        Extra: Using where; Using filesort
+```
+
+What each column means, and what this row is saying:
+
+| Column | Meaning | Reading above |
+| --- | --- | --- |
+| `id` | Which `SELECT` in the statement this row describes | `1` — a single, non-nested query |
+| `select_type` | The role of that `SELECT` (subquery, union, derived table…) | `SIMPLE` — no subqueries or unions |
+| `table` | The table this row is about | `rets_property` |
+| `partitions` | Partitions that will be searched | `NULL` — the table isn't partitioned |
+| `type` | **The access method.** Worst to best: `ALL` (read every row) → `index` (read the whole index) → `range` (walk a slice of an index) → `ref` → `eq_ref` → `const` | `ALL` — a full table scan |
+| `possible_keys` | Indexes the optimizer *could* have used | `NULL` — none exist for these columns |
+| `key` | The index actually chosen | `NULL` — no index used |
+| `key_len` | Bytes of the index used. On a composite index this reveals **how many leading columns** are in play | `NULL` |
+| `ref` | What the indexed column is compared against (a constant, another column…) | `NULL` |
+| `rows` | Estimated rows MySQL will examine | `35353` — most of the 53,122-row table |
+| `filtered` | Estimated % of those rows surviving `WHERE` | `1.23` — 35353 × 1.23% ≈ 435 rows expected out |
+| `Extra` | Everything else. `Using where` = rows are filtered after being read; `Using index` = covering index, no table lookup needed; **`Using filesort`** = the `ORDER BY` can't be served by an index, so the whole result set is sorted separately; `Using temporary` = an internal temp table is built | `Using where; Using filesort` — both of the slow ones |
+
+`EXPLAIN ANALYZE` confirmed the estimate: a table scan of all 53,122 rows,
+**557 ms**, to return 20 listings.
+
+## Composite indexes
+
+Two indexes carry this query (see `backend/db/indexes.sql`):
+
+`idx_city_price` — a **functional composite** on
+`((LOWER(TRIM(L_City))), L_SystemPrice)`. It has to be built on the expression,
+not the bare column: once the query wraps `L_City` in `LOWER(TRIM(...))`, a
+plain index on `L_City` is unusable, because the optimizer has no way to know
+the function preserves ordering. The column order matters too — city is an
+equality match and price is a range, and a composite index can only use a range
+on its *last* referenced column, so `(city, price)` works while `(price, city)`
+would stop at the price range.
+
+The same index also serves the `ORDER BY`: rows for one city are already stored
+in price order inside it, so there is nothing left to sort.
+
+After adding it:
+
+```
+         type: range
+possible_keys: idx_L_SystemPrice,idx_L_Keyword2,idx_LM_Dec_3,idx_city_price
+          key: idx_city_price
+      key_len: 208
+          ref: NULL
+         rows: 116
+     filtered: 25.00
+        Extra: Using where
+```
+
+`type` went `ALL` → `range`, `key` is no longer `NULL`, `rows` fell from 35,353
+to 116, and `Using filesort` is gone. `EXPLAIN ANALYZE`: **557 ms → 4.3 ms**,
+roughly a **130×** improvement.
+
+## The DESC sort was still doing a filesort
+
+An unfiltered sort — what the listings page issues when the user picks a sort
+with no filters — told a different story. `ORDER BY L_SystemPrice ASC, id ASC`
+was an index scan (0.9 ms), but `ORDER BY L_SystemPrice DESC, id ASC` was a full
+scan plus filesort (**634 ms**), *despite* `idx_L_SystemPrice` existing.
+
+The reason is that InnoDB appends the primary key to every secondary index, so
+`idx_L_SystemPrice` is physically `(L_SystemPrice, id)`, both ascending. MySQL
+can read any index forwards or backwards, which covers `price ASC, id ASC` and
+`price DESC, id DESC` — but `price DESC, id ASC` matches neither direction, so
+the optimizer abandons the index and sorts all 53k rows.
+
+The fix was in the query, not the schema: `routes/properties.js` now makes the
+`id` tiebreaker follow `sortOrder` instead of pinning it to `ASC`.
+
+```js
+const resolvedOrder = sortOrder ?? "asc";
+`ORDER BY ${sortBy} ${resolvedOrder}, id ${resolvedOrder}`
+```
+
+`id` is unique, so this is exactly as deterministic for pagination as `id ASC`
+was — verified again by checking that two consecutive pages of a
+`sortOrder=desc` request share no `L_ListingID`. The plan becomes a reverse
+index scan: **634 ms → 2.8 ms**.
+
+Two more indexes (`idx_ListingContractDate`, `idx_LM_Int2_3`) cover the sort
+columns that weren't already indexed as filter columns. With those, all eight
+combinations the sort dropdown can produce run as index scans — the slowest is
+0.8 ms. Without the tiebreaker fix this would have needed eight indexes, four of
+them explicitly `DESC`.
+
+| Sort | Before | After |
+| --- | --- | --- |
+| 4 filters + price ASC | 557 ms, filesort | 4.3 ms, `range` on `idx_city_price` |
+| price DESC (no filter) | 634 ms, filesort | 2.8 ms, reverse index scan |
+| date listed DESC | 520 ms, filesort | 0.19 ms, reverse index scan |
+| square footage DESC | 643 ms, filesort | 0.81 ms, reverse index scan |
+| beds DESC | 619 ms, filesort | 0.48 ms, reverse index scan |
+
+Note: `backend/db/indexes.sql` is not run automatically. Re-importing
+`rets_property.sql` drops these indexes with the table, and the symptom is
+exactly the "before" column above.
+
+## Request timing
+
+The logging middleware in `server.js` brackets each request with
+`process.hrtime.bigint()` (nanosecond resolution, unaffected by wall-clock
+adjustments) and logs on the response's `finish` event, so the number covers the
+full handler including the database round trip:
+
+```
+[2026-08-17T06:28:15.412Z] GET /api/properties?city=Beverly+Hills&sortBy=L_SystemPrice 200 5.8ms
+```
+
+## Error boundary
+
+`components/ErrorBoundary.js` wraps the routed content in `App.js`. It has to be
+a class component — `componentDidCatch` has no hook equivalent.
+
+- `getDerivedStateFromError` runs in the render phase and only swaps in the
+  fallback UI; it must stay pure, so logging lives in `componentDidCatch`.
+- The fallback offers **Try again** (clears the error state and re-renders the
+  children, which recovers from transient failures without losing the SPA) and
+  **Reload page** as the fallback of the fallback.
+- The boundary is keyed on `location.pathname`. Error state survives re-renders,
+  so without the key a boundary tripped on the detail page would keep showing
+  its fallback after the user navigated home.
+
+It catches errors thrown during render, in lifecycle methods, and in
+constructors. It does **not** catch errors in event handlers, in async code, or
+during server rendering — the `fetch` failures in `ListingsPage` are still
+handled by their own `try`/`catch`, and the two mechanisms are complementary
+rather than redundant.
+
+Tested in `components/ErrorBoundary.test.js`: children render normally when
+nothing throws, the fallback replaces them when something does, the error is
+logged, and **Try again** restores the children.
+
+## Console warnings
+
+`npm run build` compiles with no ESLint warnings, and the 114-test suite runs
+without React warnings in its output. The two sources that had been noisy are
+already handled: `App.js` opts into `v7_startTransition` and
+`v7_relativeSplatPath` so react-router v6 stops warning about v7 behaviour
+changes, and every list render supplies a `key`.
+
+The `DeprecationWarning` lines in `logs/frontend.log` (`fs.F_OK`,
+`onAfterSetupMiddleware`, `util._extend`) come from webpack-dev-server's own
+Node dependencies, not from application code — they are not fixable from this
+repo and do not appear in the browser console.

@@ -2,12 +2,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchProperties } from "../api/client";
 import PropertyCard from "../components/PropertyCard";
 import PropertyFilters from "../components/PropertyFilters";
+import PropertySort from "../components/PropertySort";
+import Pagination from "../components/Pagination";
 import "./ListingsPage.css";
 
 const NO_FILTERS = {};
+const NO_SORT = { sortBy: "", sortOrder: "" };
+const ITEMS_PER_PAGE = 20;
 
 function ListingsPage() {
   const [filters, setFilters] = useState(NO_FILTERS);
+  const [sort, setSort] = useState(NO_SORT);
+  const [currentPage, setCurrentPage] = useState(1);
   const [properties, setProperties] = useState([]);
   const [total, setTotal] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
@@ -26,7 +32,10 @@ function ListingsPage() {
     setIsLoading(true);
     setError(null);
 
-    fetchProperties(filters)
+    const offset = (currentPage - 1) * ITEMS_PER_PAGE;
+    const sortParams = sort.sortBy ? { sortBy: sort.sortBy, sortOrder: sort.sortOrder } : {};
+
+    fetchProperties({ ...filters, ...sortParams, limit: ITEMS_PER_PAGE, offset })
       .then((data) => {
         if (isStale()) return;
         setProperties(data.results);
@@ -42,25 +51,47 @@ function ListingsPage() {
         if (isStale()) return;
         setIsLoading(false);
       });
-  }, [filters]);
+  }, [filters, sort, currentPage]);
 
   const handleSearch = useCallback((nextFilters) => {
     setFilters(nextFilters);
+    setSort(NO_SORT);
+    setCurrentPage(1);
   }, []);
 
   const handleClear = useCallback(() => {
     setFilters(NO_FILTERS);
+    setSort(NO_SORT);
+    setCurrentPage(1);
+  }, []);
+
+  const handleSortChange = useCallback((sortBy, sortOrder) => {
+    setSort({ sortBy, sortOrder });
+    setCurrentPage(1);
+  }, []);
+
+  const handlePageChange = useCallback((page) => {
+    setCurrentPage(page);
+    window.scrollTo(0, 0);
   }, []);
 
   return (
     <div className="listings-page">
       <PropertyFilters onSearch={handleSearch} onClear={handleClear} />
-      {renderResults({ isLoading, error, properties, total })}
+      <PropertySort sortBy={sort.sortBy} sortOrder={sort.sortOrder} onChange={handleSortChange} />
+      {renderResults({
+        isLoading,
+        error,
+        properties,
+        total,
+        currentPage,
+        onPageChange: handlePageChange,
+      })}
     </div>
   );
 }
 
-function renderResults({ isLoading, error, properties, total }) {
+function renderResults({ isLoading, error, properties, total, currentPage, onPageChange }) {
   if (isLoading) {
     return <p className="listings-page__status">Loading properties…</p>;
   }
@@ -77,16 +108,21 @@ function renderResults({ isLoading, error, properties, total }) {
     );
   }
 
+  const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
+  const rangeStart = (currentPage - 1) * ITEMS_PER_PAGE + 1;
+  const rangeEnd = rangeStart + properties.length - 1;
+
   return (
     <>
       <p className="listings-page__count">
-        Showing {properties.length} of {total} properties
+        Showing {rangeStart}-{rangeEnd} of {total} properties
       </p>
       <div className="listings-page__grid">
         {properties.map((property) => (
           <PropertyCard key={property.L_ListingID} property={property} />
         ))}
       </div>
+      <Pagination currentPage={currentPage} totalPages={totalPages} onPageChange={onPageChange} />
     </>
   );
 }

@@ -23,6 +23,21 @@ const LISTING_COLUMNS = [
   "LotSizeAcres",
 ];
 
+// sortBy is interpolated directly into the ORDER BY clause below (column
+// names can't be bound as query placeholders), so this whitelist is what
+// stands between the query string and SQL injection -- it must contain the
+// real rets_property column names, not RESO field names. "ListPrice" would
+// pass a naive validator and then silently produce an unsorted (or broken)
+// query; "L_SystemPrice" is the column that actually exists.
+const SORTABLE_COLUMNS = new Set([
+  "L_SystemPrice", // price
+  "ListingContractDate", // date listed
+  "LM_Int2_3", // square footage
+  "L_Keyword2", // beds
+]);
+
+const SORT_ORDERS = new Set(["asc", "desc"]);
+
 function parseIntParam(rawValue, { min, max, fieldName }) {
   const n = Number(rawValue);
   if (!Number.isInteger(n)) {
@@ -61,7 +76,7 @@ function isValidListingId(id) {
 }
 
 router.get("/", async (req, res) => {
-  const { city, zipcode, minPrice, maxPrice, beds, baths } = req.query;
+  const { city, zipcode, minPrice, maxPrice, beds, baths, sortBy, sortOrder } = req.query;
   const errors = [];
 
   const limitResult = parseIntParam(req.query.limit ?? DEFAULT_LIMIT, {
@@ -88,6 +103,14 @@ router.get("/", async (req, res) => {
 
   const bathsResult = parseNumberParam(baths, { min: 0, fieldName: "baths" });
   if (bathsResult.error) errors.push(bathsResult.error);
+
+  if (sortBy !== undefined && !SORTABLE_COLUMNS.has(sortBy)) {
+    errors.push(`sortBy must be one of: ${[...SORTABLE_COLUMNS].join(", ")}`);
+  }
+
+  if (sortOrder !== undefined && !SORT_ORDERS.has(sortOrder.toLowerCase())) {
+    errors.push("sortOrder must be 'asc' or 'desc'");
+  }
 
   if (
     minPriceResult.value !== undefined &&
@@ -147,6 +170,26 @@ router.get("/", async (req, res) => {
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
+  // sortBy/sortOrder are already confirmed to be exact matches against
+  // SORTABLE_COLUMNS / SORT_ORDERS above, so interpolating them here doesn't
+  // open an injection path. `id` breaks ties deterministically -- without it,
+  // rows with an equal sort value could reorder between page 1 and page 2 of
+  // the same request, duplicating or skipping listings across pagination.
+  //
+  // The tiebreaker follows the sort direction rather than always being ASC.
+  // InnoDB appends the primary key to every secondary index, so
+  // idx_L_SystemPrice is physically (L_SystemPrice, id) ascending. MySQL can
+  // read that index forwards or backwards, but "L_SystemPrice DESC, id ASC"
+  // matches neither direction -- the optimizer gives up on the index and
+  // falls back to sorting the whole result set (EXPLAIN: Using filesort,
+  // 53k rows, ~630ms). "L_SystemPrice DESC, id DESC" is a plain reverse scan
+  // (~2ms) and is just as deterministic, since id is unique.
+  const resolvedOrder = sortOrder ?? "asc";
+  const orderByClause =
+    sortBy !== undefined
+      ? `ORDER BY ${sortBy} ${resolvedOrder}, id ${resolvedOrder}`
+      : "ORDER BY id";
+
   try {
     const [countRows] = await pool.query(
       `SELECT COUNT(*) AS total FROM rets_property ${whereClause}`,
@@ -155,7 +198,7 @@ router.get("/", async (req, res) => {
     const total = countRows[0].total;
 
     const [results] = await pool.query(
-      `SELECT ${LISTING_COLUMNS.join(", ")} FROM rets_property ${whereClause} ORDER BY id LIMIT ? OFFSET ?`,
+      `SELECT ${LISTING_COLUMNS.join(", ")} FROM rets_property ${whereClause} ${orderByClause} LIMIT ? OFFSET ?`,
       [...values, limitResult.value, offsetResult.value]
     );
 

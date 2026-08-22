@@ -43,8 +43,15 @@ function property(id, address, city) {
   };
 }
 
-function payload(results) {
-  return { total: results.length, limit: 20, offset: 0, results };
+function payload(results, total = results.length) {
+  return { total, limit: 20, offset: 0, results };
+}
+
+/** A full page of distinctly-named properties, for pagination tests. */
+function pageOfProperties(pageNumber, count = 20) {
+  return Array.from({ length: count }, (_, i) =>
+    property(`${pageNumber}-${i}`, `Property ${pageNumber}-${i}`, "Portland")
+  );
 }
 
 /** Queues a deferred response per call so tests decide when each one lands. */
@@ -85,7 +92,7 @@ describe("ListingsPage", () => {
     expect(screen.getByText(/loading properties/i)).toBeInTheDocument();
 
     expect(await screen.findByText("1 Oak St")).toBeInTheDocument();
-    expect(fetchProperties).toHaveBeenCalledWith({});
+    expect(fetchProperties).toHaveBeenCalledWith({ limit: 20, offset: 0 });
   });
 
   it("sends only the non-empty filters when the form is submitted", async () => {
@@ -99,7 +106,12 @@ describe("ListingsPage", () => {
     search();
 
     await waitFor(() => {
-      expect(fetchProperties).toHaveBeenLastCalledWith({ city: "Portland", beds: "3" });
+      expect(fetchProperties).toHaveBeenLastCalledWith({
+        city: "Portland",
+        beds: "3",
+        limit: 20,
+        offset: 0,
+      });
     });
     // zipcode / minPrice / maxPrice / baths were left blank and must be absent.
     expect(fetchProperties).toHaveBeenLastCalledWith(
@@ -123,10 +135,14 @@ describe("ListingsPage", () => {
 
     userEvent.type(screen.getByLabelText(/city/i), "Portland");
     search();
-    await waitFor(() => expect(fetchProperties).toHaveBeenLastCalledWith({ city: "Portland" }));
+    await waitFor(() =>
+      expect(fetchProperties).toHaveBeenLastCalledWith({ city: "Portland", limit: 20, offset: 0 })
+    );
 
     clear();
-    await waitFor(() => expect(fetchProperties).toHaveBeenLastCalledWith({}));
+    await waitFor(() =>
+      expect(fetchProperties).toHaveBeenLastCalledWith({ limit: 20, offset: 0 })
+    );
     expect(screen.getByLabelText(/city/i)).toHaveValue("");
   });
 
@@ -167,5 +183,250 @@ describe("ListingsPage", () => {
     await settle(pending[3], payload([property("4", "7 Pine St", "Seattle")]));
     expect(screen.getByText("7 Pine St")).toBeInTheDocument();
     expect(screen.queryByText("99 Stale Ave")).not.toBeInTheDocument();
+  });
+
+  describe("pagination", () => {
+    beforeEach(() => {
+      // jsdom doesn't implement scrolling; stubbed so the page-change handler
+      // can be asserted on without a "not implemented" console error.
+      window.scrollTo = jest.fn();
+    });
+
+    it("shows the result range and requests the next offset when a page is clicked", async () => {
+      fetchProperties.mockResolvedValue(payload(pageOfProperties(1), 45));
+
+      renderPage();
+      await screen.findByText("Property 1-0");
+      expect(screen.getByText("Showing 1-20 of 45 properties")).toBeInTheDocument();
+
+      userEvent.click(screen.getByRole("button", { name: "2" }));
+
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({ limit: 20, offset: 20 })
+      );
+    });
+
+    it("scrolls to the top when the page changes", async () => {
+      fetchProperties.mockResolvedValue(payload(pageOfProperties(1), 45));
+
+      renderPage();
+      await screen.findByText("Property 1-0");
+
+      userEvent.click(screen.getByRole("button", { name: "2" }));
+
+      await waitFor(() => expect(window.scrollTo).toHaveBeenCalledWith(0, 0));
+    });
+
+    it("preserves the active filters when changing pages", async () => {
+      fetchProperties.mockResolvedValue(payload(pageOfProperties(1), 45));
+
+      renderPage();
+      await screen.findByText("Property 1-0");
+
+      userEvent.type(screen.getByLabelText(/city/i), "Portland");
+      search();
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({
+          city: "Portland",
+          limit: 20,
+          offset: 0,
+        })
+      );
+
+      userEvent.click(screen.getByRole("button", { name: "2" }));
+
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({
+          city: "Portland",
+          limit: 20,
+          offset: 20,
+        })
+      );
+    });
+
+    it("resets to page 1 when a new search is applied from a later page", async () => {
+      fetchProperties.mockResolvedValue(payload(pageOfProperties(1), 45));
+
+      renderPage();
+      await screen.findByText("Property 1-0");
+
+      userEvent.click(screen.getByRole("button", { name: "3" }));
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({ limit: 20, offset: 40 })
+      );
+
+      userEvent.type(screen.getByLabelText(/city/i), "Seattle");
+      search();
+
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({
+          city: "Seattle",
+          limit: 20,
+          offset: 0,
+        })
+      );
+    });
+
+    it("resets to page 1 when filters are cleared from a later page", async () => {
+      fetchProperties.mockResolvedValue(payload(pageOfProperties(1), 45));
+
+      renderPage();
+      await screen.findByText("Property 1-0");
+
+      userEvent.click(screen.getByRole("button", { name: "2" }));
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({ limit: 20, offset: 20 })
+      );
+
+      clear();
+
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({ limit: 20, offset: 0 })
+      );
+    });
+
+    it("hides pagination controls when everything fits on one page", async () => {
+      fetchProperties.mockResolvedValue(payload([property("1", "1 Oak St", "Portland")]));
+
+      renderPage();
+      await screen.findByText("1 Oak St");
+
+      expect(screen.queryByRole("navigation", { name: /pagination/i })).not.toBeInTheDocument();
+    });
+  });
+
+  describe("sorting", () => {
+    function chooseSort(optionValue) {
+      userEvent.selectOptions(screen.getByLabelText(/sort by/i), optionValue);
+    }
+
+    it("sends the real column name and order once a sort option is chosen", async () => {
+      fetchProperties.mockResolvedValue(payload([property("1", "1 Oak St", "Portland")]));
+
+      renderPage();
+      await screen.findByText("1 Oak St");
+
+      chooseSort("L_SystemPrice:asc");
+
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({
+          sortBy: "L_SystemPrice",
+          sortOrder: "asc",
+          limit: 20,
+          offset: 0,
+        })
+      );
+    });
+
+    it("sends no sortBy/sortOrder at all while Default is selected", async () => {
+      fetchProperties.mockResolvedValue(payload([property("1", "1 Oak St", "Portland")]));
+
+      renderPage();
+      await screen.findByText("1 Oak St");
+
+      expect(fetchProperties).toHaveBeenLastCalledWith(
+        expect.not.objectContaining({ sortBy: expect.anything() })
+      );
+    });
+
+    it("persists the chosen sort across a page change", async () => {
+      fetchProperties.mockResolvedValue(payload(pageOfProperties(1), 45));
+      window.scrollTo = jest.fn();
+
+      renderPage();
+      await screen.findByText("Property 1-0");
+
+      chooseSort("LM_Int2_3:desc");
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({
+          sortBy: "LM_Int2_3",
+          sortOrder: "desc",
+          limit: 20,
+          offset: 0,
+        })
+      );
+
+      userEvent.click(screen.getByRole("button", { name: "2" }));
+
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({
+          sortBy: "LM_Int2_3",
+          sortOrder: "desc",
+          limit: 20,
+          offset: 20,
+        })
+      );
+    });
+
+    it("resets to page 1 when the sort changes from a later page", async () => {
+      fetchProperties.mockResolvedValue(payload(pageOfProperties(1), 45));
+      window.scrollTo = jest.fn();
+
+      renderPage();
+      await screen.findByText("Property 1-0");
+
+      userEvent.click(screen.getByRole("button", { name: "3" }));
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({ limit: 20, offset: 40 })
+      );
+
+      chooseSort("L_Keyword2:asc");
+
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({
+          sortBy: "L_Keyword2",
+          sortOrder: "asc",
+          limit: 20,
+          offset: 0,
+        })
+      );
+    });
+
+    it("resets the sort back to Default when a new search is applied", async () => {
+      fetchProperties.mockResolvedValue(payload([property("1", "1 Oak St", "Portland")]));
+
+      renderPage();
+      await screen.findByText("1 Oak St");
+
+      chooseSort("L_SystemPrice:desc");
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sortBy: "L_SystemPrice" })
+        )
+      );
+
+      userEvent.type(screen.getByLabelText(/city/i), "Seattle");
+      search();
+
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({
+          city: "Seattle",
+          limit: 20,
+          offset: 0,
+        })
+      );
+      expect(screen.getByLabelText(/sort by/i)).toHaveValue("");
+    });
+
+    it("resets the sort back to Default when filters are cleared", async () => {
+      fetchProperties.mockResolvedValue(payload([property("1", "1 Oak St", "Portland")]));
+
+      renderPage();
+      await screen.findByText("1 Oak St");
+
+      chooseSort("ListingContractDate:asc");
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sortBy: "ListingContractDate" })
+        )
+      );
+
+      clear();
+
+      await waitFor(() =>
+        expect(fetchProperties).toHaveBeenLastCalledWith({ limit: 20, offset: 0 })
+      );
+      expect(screen.getByLabelText(/sort by/i)).toHaveValue("");
+    });
   });
 });
