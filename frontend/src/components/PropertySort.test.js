@@ -53,11 +53,11 @@ describe("PropertySort", () => {
 
   it("offers every sortable field from the backend whitelist, in both directions", () => {
     renderSort();
-    const select = screen.getByLabelText(/sort by/i);
+    const values = screen.getAllByRole("option").map((option) => option.value);
 
     for (const column of ["L_SystemPrice", "ListingContractDate", "LM_Int2_3", "L_Keyword2"]) {
-      expect(select.querySelector(`option[value="${column}:asc"]`)).not.toBeNull();
-      expect(select.querySelector(`option[value="${column}:desc"]`)).not.toBeNull();
+      expect(values).toContain(`${column}:asc`);
+      expect(values).toContain(`${column}:desc`);
     }
   });
 });
