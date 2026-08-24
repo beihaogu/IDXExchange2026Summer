@@ -1,10 +1,9 @@
-import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { fetchProperty, fetchOpenHouses } from "../api/client";
 import { formatPrice } from "../utils/format";
 import PropertyImageGallery from "../components/PropertyImageGallery";
 import PropertyMap from "../components/PropertyMap";
 import OpenHouseList from "../components/OpenHouseList";
+import { usePropertyDetail } from "../hooks/usePropertyDetail";
 import "./PropertyDetailPage.css";
 
 const DETAIL_FIELDS = [
@@ -21,40 +20,7 @@ const DETAIL_FIELDS = [
 
 function PropertyDetailPage() {
   const { id } = useParams();
-  const [property, setProperty] = useState(null);
-  const [openHouses, setOpenHouses] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    setIsLoading(true);
-    setError(null);
-
-    fetchProperty(id)
-      .then((propertyData) => {
-        if (cancelled) return;
-        setProperty(propertyData);
-        return fetchOpenHouses(id).then((openHouseData) => {
-          if (cancelled) return;
-          setOpenHouses(openHouseData);
-        });
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setProperty(null);
-        setError(err.message);
-      })
-      .finally(() => {
-        if (cancelled) return;
-        setIsLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [id]);
+  const { property, openHouses, isLoading, error } = usePropertyDetail(id);
 
   return (
     <div className="property-detail-page">
