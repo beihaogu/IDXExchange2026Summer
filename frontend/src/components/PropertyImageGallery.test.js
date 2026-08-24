@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import PropertyImageGallery from "./PropertyImageGallery";
 
@@ -18,12 +18,12 @@ function openLightbox() {
 }
 
 /**
- * Dispatches a key on whatever currently holds focus, the way a browser routes
- * real key events. Firing straight at the overlay would pass even if nothing
- * were focusable, which is exactly the bug these tests guard against.
+ * Types a key the way a browser does: userEvent routes it to whatever currently
+ * holds focus. Firing straight at the overlay would pass even if nothing were
+ * focusable, which is exactly the bug these tests guard against.
  */
 function pressKey(key) {
-  fireEvent.keyDown(document.activeElement, { key });
+  userEvent.keyboard(`{${key}}`);
 }
 
 describe("PropertyImageGallery", () => {

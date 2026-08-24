@@ -33,9 +33,17 @@ describe("OpenHouseList", () => {
   });
 
   it("omits the remarks line when the blob has none", () => {
-    const { container } = render(<OpenHouseList openHouses={[openHouse()]} />);
+    const { rerender } = render(
+      <OpenHouseList openHouses={[openHouse({ remarks: "Bring your agent" })]} />
+    );
+    expect(screen.getByText("Bring your agent")).toBeInTheDocument();
 
-    expect(container.querySelector(".open-house-list__remarks")).toBeNull();
+    // Same open house, blob without remarks: the line has to disappear rather
+    // than render empty.
+    rerender(<OpenHouseList openHouses={[openHouse()]} />);
+
+    expect(screen.queryByText("Bring your agent")).not.toBeInTheDocument();
+    expect(screen.getByText("Tue, Jun 16, 2026")).toBeInTheDocument();
   });
 
   it("renders every open house it is given", () => {
