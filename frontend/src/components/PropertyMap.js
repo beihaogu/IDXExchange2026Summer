@@ -1,3 +1,4 @@
+import PropTypes from "prop-types";
 import "./PropertyMap.css";
 
 function PropertyMap({ latitude, longitude, address }) {
@@ -34,5 +35,14 @@ function PropertyMap({ latitude, longitude, address }) {
     </div>
   );
 }
+
+// LMD_MP_Latitude/Longitude are DECIMAL columns, so they arrive as strings;
+// they are also null for listings without coordinates, which is why the
+// component renders nothing rather than requiring them.
+PropertyMap.propTypes = {
+  latitude: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
+  longitude: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
+  address: PropTypes.string,
+};
 
 export default PropertyMap;

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import PropTypes from "prop-types";
 import "./PropertyFilters.css";
 
 const EMPTY_FILTERS = {
@@ -135,5 +136,11 @@ function PropertyFilters({ onSearch, onClear }) {
     </form>
   );
 }
+
+PropertyFilters.propTypes = {
+  // Called with the stripped filter object; blank fields are dropped first.
+  onSearch: PropTypes.func.isRequired,
+  onClear: PropTypes.func.isRequired,
+};
 
 export default PropertyFilters;

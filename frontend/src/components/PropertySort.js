@@ -1,3 +1,4 @@
+import PropTypes from "prop-types";
 import "./PropertySort.css";
 
 // Values are "<column>:<order>" pairs using the real rets_property column
@@ -43,5 +44,13 @@ function PropertySort({ sortBy, sortOrder, onChange }) {
     </div>
   );
 }
+
+PropertySort.propTypes = {
+  // "" for the Default option; otherwise a whitelisted column name and an
+  // order, kept as two props so they map straight onto the query parameters.
+  sortBy: PropTypes.string,
+  sortOrder: PropTypes.oneOf(["", "asc", "desc"]),
+  onChange: PropTypes.func.isRequired,
+};
 
 export default PropertySort;

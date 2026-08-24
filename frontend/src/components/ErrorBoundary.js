@@ -1,4 +1,5 @@
 import { Component } from "react";
+import PropTypes from "prop-types";
 import "./ErrorBoundary.css";
 
 // Error boundaries have to be class components -- there is no hook equivalent
@@ -63,5 +64,9 @@ class ErrorBoundary extends Component {
     );
   }
 }
+
+ErrorBoundary.propTypes = {
+  children: PropTypes.node,
+};
 
 export default ErrorBoundary;

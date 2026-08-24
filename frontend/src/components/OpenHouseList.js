@@ -1,3 +1,4 @@
+import PropTypes from "prop-types";
 import { formatOpenHouseDate, formatOpenHouseTime, parseOpenHouseRemarks } from "../utils/openHouse";
 import "./OpenHouseList.css";
 
@@ -23,5 +24,19 @@ function OpenHouseList({ openHouses }) {
     </ul>
   );
 }
+
+OpenHouseList.propTypes = {
+  // The component renders an empty state for both [] and a missing prop, so
+  // the array itself is optional. all_data is the raw JSON blob the remarks
+  // are dug out of.
+  openHouses: PropTypes.arrayOf(
+    PropTypes.shape({
+      OpenHouseDate: PropTypes.string,
+      OH_StartTime: PropTypes.string,
+      OH_EndTime: PropTypes.string,
+      all_data: PropTypes.string,
+    })
+  ),
+};
 
 export default OpenHouseList;

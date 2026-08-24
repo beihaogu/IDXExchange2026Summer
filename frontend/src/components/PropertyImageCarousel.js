@@ -1,4 +1,5 @@
 import { useState } from "react";
+import PropTypes from "prop-types";
 import { parsePhotos } from "../utils/photos";
 import "./PropertyImageCarousel.css";
 
@@ -61,5 +62,13 @@ function PropertyImageCarousel({ rawPhotos, alt }) {
     </div>
   );
 }
+
+// rawPhotos is the raw L_Photos column -- a JSON-encoded array of URLs, and
+// null for listings with no photos. parsePhotos treats anything unparseable as
+// empty, so the prop stays optional rather than required.
+PropertyImageCarousel.propTypes = {
+  rawPhotos: PropTypes.string,
+  alt: PropTypes.string,
+};
 
 export default PropertyImageCarousel;

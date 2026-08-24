@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import PropTypes from "prop-types";
 import "./Lightbox.css";
 
 function Lightbox({ photos, index, alt, onClose, onNavigate }) {
@@ -75,5 +76,14 @@ function Lightbox({ photos, index, alt, onClose, onNavigate }) {
     </div>
   );
 }
+
+Lightbox.propTypes = {
+  // Already-parsed URLs -- the gallery owns the parsing, this only displays.
+  photos: PropTypes.arrayOf(PropTypes.string).isRequired,
+  index: PropTypes.number.isRequired,
+  alt: PropTypes.string,
+  onClose: PropTypes.func.isRequired,
+  onNavigate: PropTypes.func.isRequired,
+};
 
 export default Lightbox;
