@@ -1,3 +1,4 @@
+import PropTypes from "prop-types";
 import { Link } from "react-router-dom";
 import PropertyImageCarousel from "./PropertyImageCarousel";
 import { formatPrice } from "../utils/format";
@@ -28,5 +29,26 @@ function PropertyCard({ property }) {
     </Link>
   );
 }
+
+// MySQL hands back DECIMAL columns (LM_Dec_3) as strings while INT columns
+// (LM_Int2_3, L_Keyword2) come through as numbers, and L_ListingID is a string
+// in the detail response but arrives as either from the list endpoint -- hence
+// oneOfType rather than a single type per numeric-looking field.
+const numericField = PropTypes.oneOfType([PropTypes.string, PropTypes.number]);
+
+PropertyCard.propTypes = {
+  property: PropTypes.shape({
+    L_ListingID: numericField.isRequired,
+    L_Address: PropTypes.string,
+    L_City: PropTypes.string,
+    L_State: PropTypes.string,
+    L_SystemPrice: numericField,
+    // A JSON-encoded array of URL strings, parsed by utils/photos.
+    L_Photos: PropTypes.string,
+    L_Keyword2: numericField,
+    LM_Dec_3: numericField,
+    LM_Int2_3: numericField,
+  }).isRequired,
+};
 
 export default PropertyCard;

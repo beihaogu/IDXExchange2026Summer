@@ -1,4 +1,5 @@
 import { useState } from "react";
+import PropTypes from "prop-types";
 import { parsePhotos } from "../utils/photos";
 import Lightbox from "./Lightbox";
 import "./PropertyImageGallery.css";
@@ -59,5 +60,12 @@ function PropertyImageGallery({ rawPhotos, alt }) {
     </div>
   );
 }
+
+PropertyImageGallery.propTypes = {
+  // Raw L_Photos column: a JSON-encoded array of URLs, null when the listing
+  // has no photos.
+  rawPhotos: PropTypes.string,
+  alt: PropTypes.string,
+};
 
 export default PropertyImageGallery;
