@@ -22,3 +22,5 @@ logs/
 
 SDE_Guide_Internship Final v.2.pdf
 guide.md
+# Coverage reports are generated artifacts, not source.
+coverage/

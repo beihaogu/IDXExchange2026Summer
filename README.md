@@ -1,19 +1,119 @@
-# Week 1 - MySQL Environment Setup
+# IDX Exchange
 
-## Overview
+A property search application built on a real MLS (RETS) data feed. It serves
+53,000+ California listings with filtering, sorting, pagination, photo
+galleries, maps, and open house schedules.
 
-This project sets up a local MySQL 8 instance using Docker and imports the provided RETS database dumps.
+![Listings page](docs/images/listings.png)
 
-## Environment
+<details>
+<summary>Property detail page</summary>
 
-- Docker Desktop
-- MySQL 8
-- Database: `rets`
-- Container: `idx-mysql-local`
+![Property detail page](docs/images/detail.png)
+
+</details>
 
 ---
 
-## Start MySQL
+## Table of contents
+
+- [Tech stack](#tech-stack)
+- [Architecture](#architecture)
+- [Local setup](#local-setup)
+- [API reference](#api-reference)
+- [Database schema](#database-schema)
+- [Testing](#testing)
+- [Known issues and future improvements](#known-issues-and-future-improvements)
+
+---
+
+## Tech stack
+
+| Layer | Technology | Version |
+| --- | --- | --- |
+| Runtime | Node.js | 24.x (18+ works) |
+| Database | MySQL (Docker `mysql:8`) | 8.x |
+| Backend | Express | 4.22 |
+| DB driver | mysql2 (promise API, pooled) | 3.9 |
+| Frontend | React | 19.2 |
+| Routing | React Router | 6.30 |
+| Build | Create React App (react-scripts) | 5.0.1 |
+| Backend tests | Jest + Supertest | 30.x / 7.x |
+| Frontend tests | Jest + React Testing Library | via react-scripts |
+| Maps | Google Maps Embed API | — |
+
+---
+
+## Architecture
+
+```
+Browser (React SPA, :3000)
+   |
+   |  fetch("/api/...")  -- CRA dev server proxies to :5000
+   v
+Express API (:5000)
+   |
+   |  pooled mysql2 queries
+   v
+MySQL 8 in Docker (:3306, database `rets`)
+```
+
+Three layers, each with a single responsibility:
+
+- **MySQL** holds the two raw RETS dumps as imported. No ETL step — the API
+  reads the vendor column names directly (`L_SystemPrice`, `LM_Dec_3`, …), so
+  a re-import never requires a migration.
+- **Express** owns validation and query building. Every user-supplied value is
+  bound as a placeholder; the one value that cannot be bound (the `ORDER BY`
+  column) is checked against a whitelist instead. The API is stateless.
+- **React** owns presentation and URL state. Filters, sort, and page number all
+  live in the query string, so any view is linkable and survives a refresh.
+
+### Repository layout
+
+```
+backend/
+  server.js              Express app, CORS, request logging, /api/health
+  db/pool.js             mysql2 connection pool (single shared instance)
+  db/indexes.sql         Index definitions for the search/sort columns
+  routes/properties.js   All three property endpoints + validation
+  tests/                 Jest + Supertest suites, database mocked
+frontend/src/
+  api/client.js          Thin fetch wrapper; turns non-2xx into thrown Errors
+  hooks/                 usePropertySearch, usePropertyDetail -- data fetching
+  pages/                 ListingsPage, PropertyDetailPage
+  components/            Presentational; no data fetching of their own
+  utils/                 Pure functions: pagination math, photo/date parsing
+docs/
+  weekly-notes.md        Week-by-week build log and debugging write-ups
+```
+
+The split that matters: **hooks fetch, components render, utils compute.** Pure
+logic (the pagination window, `L_Photos` parsing, UTC date formatting) lives in
+`utils/` precisely so it can be unit-tested without rendering anything.
+
+---
+
+## Local setup
+
+From a fresh machine, in order.
+
+### 1. Prerequisites
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) — running
+- Node.js 18 or newer (`node -v`)
+- The two MLS dumps, `rets_property.sql` and `rets_openhouse.sql`, downloaded
+  into the repository root. They total ~640 MB and are **not** in git; fetch
+  them from the internship FileZilla share.
+
+### 2. Clone
+
+```bash
+git clone <repository-url>
+cd IDXExchange2026Summer
+```
+
+### 3. Start MySQL and import the data
 
 ```bash
 docker run \
@@ -23,843 +123,423 @@ docker run \
   -p 3306:3306 \
   -d \
   mysql:8
-```
 
----
+# Wait for the server to accept connections (a few seconds on first boot)
+until docker exec idx-mysql-local mysqladmin ping -uroot -ppassword --silent; do sleep 2; done
 
-## Import SQL Dumps
-
-```bash
+# The property dump is ~630 MB and takes several minutes
 docker exec -i idx-mysql-local mysql -uroot -ppassword rets < rets_property.sql
-
 docker exec -i idx-mysql-local mysql -uroot -ppassword rets < rets_openhouse.sql
 ```
 
----
+On later sessions the container already exists — start it with
+`docker start idx-mysql-local` rather than re-running `docker run`.
 
-## Verification
+### 4. Add the indexes
 
-### Tables
-
-```text
-mysql> SHOW TABLES;
-
-+----------------+
-| Tables_in_rets |
-+----------------+
-| rets_openhouse |
-| rets_property  |
-+----------------+
-```
-
-### Row Counts
-
-| Table | Rows |
-|-------|-----:|
-| rets_property | 41,199 |
-| rets_openhouse | 4,282 |
-
-Verified using:
-
-```sql
-SELECT COUNT(*) FROM rets_property;
-SELECT COUNT(*) FROM rets_openhouse;
-```
-
-### Table Schemas
-
-| Table | Columns |
-|-------|--------:|
-| rets_property | 126 |
-| rets_openhouse | 13 |
-
-Example columns from `rets_property`:
-
-- id
-- L_ListingID
-- L_DisplayId
-- L_Address
-- L_City
-- L_State
-- L_SystemPrice
-- ModificationTimestamp
-- L_Status
-- YearBuilt
-- LotSizeSquareFeet
-- PhotosChangeTimestamp
-
-Example columns from `rets_openhouse`:
-
-- id
-- L_ListingID
-- L_DisplayId
-- OpenHouseDate
-- OH_StartTime
-- OH_EndTime
-- updated_date
-
-Schemas verified using:
-
-```sql
-DESCRIBE rets_property;
-DESCRIBE rets_openhouse;
-```
-
----
-
-## Useful Commands
-
-Start existing container:
+The dumps arrive indexed on a few columns (`L_ListingID`, `L_City`, `L_Zip`)
+but not on the price, beds, baths, sqft, or date columns the search and sort
+use — without these, every such query is a full 53k-row scan plus a filesort.
 
 ```bash
-docker start idx-mysql-local
+docker exec -i idx-mysql-local mysql -uroot -ppassword rets < backend/db/indexes.sql
 ```
 
-Stop container:
-
-```bash
-docker stop idx-mysql-local
-```
-
-Open MySQL shell:
-
-```bash
-docker exec -it idx-mysql-local mysql -uroot -ppassword rets
-```
-
-## Why Docker?
-
-A Docker container provides an isolated and reproducible runtime environment. Using the official MySQL 8 image ensures every developer runs the same database version and configuration without installing MySQL directly on the host operating system.
-
-# Week 2 - Backend Foundation + REST API Basics
-
-## Overview
-
-This project now includes a basic Node/Express backend with a health check endpoint that verifies the MySQL connection.
-
-## Backend Setup
-
-The backend lives in:
-
-```bash
-backend/
-```
-
-Install dependencies:
+### 5. Configure and start the backend
 
 ```bash
 cd backend
+cp .env.example .env     # defaults match the docker run above
 npm install
+npm run dev              # nodemon, http://127.0.0.1:5000
 ```
 
-Start the development server:
+`.env` values:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `PORT` | `5000` | Must match the `proxy` in `frontend/package.json` |
+| `HOST` | `127.0.0.1` | |
+| `DB_HOST` / `DB_PORT` | `127.0.0.1` / `3306` | The Docker port mapping |
+| `DB_USER` / `DB_PASSWORD` | `root` / — | Set to the `MYSQL_ROOT_PASSWORD` used above |
+| `DB_NAME` | `rets` | |
+| `DB_CONNECTION_LIMIT` | `10` | Pool size |
+
+Verify: `curl http://127.0.0.1:5000/api/health` → `{"status":"ok","database":"connected"}`
+
+### 6. Configure and start the frontend
+
+In a second terminal:
 
 ```bash
-npm run dev
+cd frontend
+cp .env.example .env     # optional: add a Google Maps key
+npm install
+npm start                # http://localhost:3000
 ```
 
-The server runs on port `5000` by default.
+Without `REACT_APP_GOOGLE_MAPS_API_KEY`, everything works except the detail
+page map, which shows an explanatory placeholder instead. To enable it, create
+a key in the Google Cloud console with the **Maps Embed API** enabled.
 
-## Environment Variables
+CRA's `proxy` setting forwards `/api/*` to port 5000 in development, so the
+frontend calls same-origin paths and no CORS configuration is needed locally.
 
-Create `backend/.env` from `backend/.env.example` and fill in the local MySQL credentials.
+### Troubleshooting
 
-The local Docker setup from Week 1 uses:
+| Symptom | Cause |
+| --- | --- |
+| `database: "disconnected"` on `/api/health` | Container stopped — `docker start idx-mysql-local` |
+| Listings load but every search is slow | Step 4 was skipped; the indexes are missing |
+| `ECONNREFUSED 127.0.0.1:5000` in the browser | The backend isn't running, or `PORT` doesn't match the CRA proxy |
+| `Unknown database 'rets'` | The container was created without `-e MYSQL_DATABASE=rets` |
 
-```env
-PORT=5000
-HOST=127.0.0.1
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=password
-DB_NAME=rets
-DB_CONNECTION_LIMIT=10
+---
+
+## API reference
+
+Base URL: `http://127.0.0.1:5000`. All responses are JSON. Errors use
+`{ "error": "..." }`, with an extra `details` array of every validation failure
+on a 400 so one round trip reports all of them.
+
+### `GET /api/health`
+
+Liveness check that also verifies the database connection.
+
+```bash
+curl http://127.0.0.1:5000/api/health
 ```
 
-Do not commit `.env`. It is listed in `.gitignore`.
-
-## Health Check
-
-Endpoint:
-
-```http
-GET /api/health
+```json
+{ "status": "ok", "database": "connected" }
 ```
 
-When MySQL is running and reachable:
+Returns `500` with `{"status":"error","database":"disconnected"}` if the pool
+cannot reach MySQL.
+
+---
+
+### `GET /api/properties`
+
+Paginated, filterable, sortable listing search.
+
+**Query parameters** — all optional:
+
+| Parameter | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `city` | string | — | Case- and whitespace-insensitive exact match |
+| `zipcode` | string | — | Exact match, trimmed |
+| `minPrice` | number ≥ 0 | — | Inclusive |
+| `maxPrice` | number ≥ 0 | — | Inclusive; must be ≥ `minPrice` |
+| `beds` | number ≥ 0 | — | **Minimum**, not exact (`3` returns 3+) |
+| `baths` | number ≥ 0 | — | **Minimum**, not exact |
+| `sortBy` | enum | — | `L_SystemPrice`, `ListingContractDate`, `LM_Int2_3`, `L_Keyword2` |
+| `sortOrder` | `asc`\|`desc` | `asc` | Only meaningful with `sortBy` |
+| `limit` | integer 1–100 | `20` | |
+| `offset` | integer ≥ 0 | `0` | |
+
+`sortBy` takes real column names rather than friendly aliases because it is
+interpolated into the `ORDER BY` clause (column names cannot be bound as
+placeholders) — the whitelist is the injection boundary.
+
+**Example request**
+
+```bash
+curl "http://127.0.0.1:5000/api/properties?city=Beverly%20Hills&minPrice=1000000&beds=3&sortBy=L_SystemPrice&sortOrder=desc&limit=2"
+```
+
+**Example response** (`200`)
 
 ```json
 {
-  "status": "ok",
-  "database": "connected"
+  "total": 233,
+  "limit": 2,
+  "offset": 0,
+  "results": [
+    {
+      "L_ListingID": "1118422731",
+      "L_Address": "1461 Laurel Way",
+      "L_City": "Beverly Hills",
+      "L_State": "CA",
+      "L_Zip": "90210",
+      "L_SystemPrice": 3950000,
+      "L_Keyword2": 4,
+      "LM_Dec_3": "5.0",
+      "LM_Int2_3": 3677,
+      "L_Photos": "[\"https://api.cotality.com/trestle/Media/...\"]",
+      "LMD_MP_Latitude": "34.099106000000000",
+      "LMD_MP_Longitude": "-118.418132000000000",
+      "YearBuilt": 1973,
+      "LotSizeAcres": "0.4261"
+    }
+  ]
 }
 ```
 
-When MySQL is unreachable, the server returns HTTP `500` instead of crashing:
+`total` is the count of rows matching the filters, ignoring `limit`/`offset` —
+it is what the frontend divides by `limit` to get the page count.
+
+**Example error** (`400`)
+
+```bash
+curl "http://127.0.0.1:5000/api/properties?limit=500&minPrice=900000&maxPrice=1000"
+```
 
 ```json
 {
-  "status": "error",
-  "database": "disconnected"
+  "error": "Invalid query parameters",
+  "details": [
+    "limit must be <= 100",
+    "minPrice must not be greater than maxPrice"
+  ]
 }
 ```
 
-## Connection Pool
+| Status | When |
+| --- | --- |
+| `200` | Success (an empty `results` array is still a 200) |
+| `400` | Any parameter fails validation |
+| `500` | Database error |
 
-A connection pool is a reusable group of database connections managed by the application. When an API request needs the database, it borrows an available connection from the pool and returns it when the query is done.
+---
 
-Creating a brand-new database connection for every request is slow and expensive. Under heavier traffic, it can also exhaust the database connection limit. A pool keeps the app faster and more stable by reusing existing connections.
+### `GET /api/properties/:id`
 
-## HTTP Methods
+Full detail for one listing, keyed on `L_ListingID`. Returns every column
+(`SELECT *`, 126 of them) — the detail page uses fields the list endpoint
+omits, such as `L_Remarks`.
 
-- `GET`: Read or fetch data.
-- `POST`: Create a new resource.
-- `PUT`: Replace or update an existing resource.
-- `DELETE`: Remove a resource.
+**Example request**
 
-## Common API Status Codes
-
-- `400 Bad Request`: The client sent invalid input, such as missing required fields.
-- `404 Not Found`: The requested route or resource does not exist.
-- `500 Internal Server Error`: Something failed on the server, such as an unreachable database.
-
-# Week 3 - Property Search Endpoint with Filters & Indexing
-
-## Endpoint
-
-```http
-GET /api/properties?city=&zipcode=&minPrice=&maxPrice=&beds=&baths=&limit=&offset=
+```bash
+curl http://127.0.0.1:5000/api/properties/1077426281
 ```
 
-Returns:
+**Example response** (`200`) — abridged
 
 ```json
-{ "total": 87, "limit": 20, "offset": 0, "results": [...] }
+{
+  "id": 13587,
+  "L_ListingID": "1077426281",
+  "L_Address": "396 Lancaster Drive",
+  "L_City": "Manteca",
+  "L_State": "CA",
+  "L_Zip": "95336",
+  "L_SystemPrice": 565000,
+  "L_Keyword2": 3,
+  "LM_Dec_3": "2.0",
+  "LM_Int2_3": 1822,
+  "YearBuilt": 1985,
+  "L_Remarks": "Welcome to this beautifully updated home ...",
+  "L_Photos": "[\"https://api.cotality.com/trestle/Media/...\"]"
+}
 ```
 
-- `limit` defaults to 20, must be an integer from 1-100.
-- `offset` defaults to 0, must be an integer >= 0.
-- `city` matches case- and whitespace-insensitively (`LOWER(TRIM(...))`) since
-  the source data has inconsistent casing (`"portland"`, `"Portland"`, ...).
-- `beds` / `baths` are treated as minimums (`>=`).
-- Invalid inputs (non-numeric, out of range, `minPrice > maxPrice`, empty
-  strings) return `400` with a `details` array of messages.
-- All filter values are bound as query parameters (`?` placeholders) — never
-  concatenated into the SQL string.
+| Status | When | Body |
+| --- | --- | --- |
+| `200` | Found | The listing object |
+| `400` | `id` isn't 1–64 alphanumeric/`-`/`_` characters | `{"error":"id must be alphanumeric and 64 characters or fewer"}` |
+| `404` | No such listing | `{"error":"No property found with id 000000000"}` |
+| `500` | Database error | `{"error":"Failed to fetch property"}` |
 
-## Indexes
+---
 
-Added in `backend/db/indexes.sql`:
+### `GET /api/properties/:id/openhouses`
 
-- `idx_L_SystemPrice`, `idx_L_Keyword2` (beds), `idx_LM_Dec_3` (baths)
-- `idx_city_price` — a **functional** index on `(LOWER(TRIM(L_City)), L_SystemPrice)`.
-  A plain `(L_City, L_SystemPrice)` index can't be used once the column is
-  wrapped in `LOWER(TRIM())` in the query — the index has to be built on the
-  same expression.
+Open house schedule for one listing, chronological by date then start time.
+Returns a bare array rather than an envelope — there is no pagination here.
 
-`idx_L_City`, `idx_L_Zip`, and the primary key already existed from the Week 1
-import.
+**Example request**
 
-Verified with `EXPLAIN`: filtering by price + beds went from a full scan
-(`type: ALL`, `key: NULL`, 25,776 rows) to using the new indexes
-(`type: range`, `key: idx_L_SystemPrice`, ~12,900 rows).
-
-Note: creating an index on this table requires relaxing `sql_mode` for the
-session — MySQL 8 re-validates every column's default when it rewrites the
-table for `CREATE INDEX`, and an unrelated column (`active_check`) has a
-zero-date default that trips `NO_ZERO_DATE` otherwise.
-
-# Week 4 - Property Detail & Open House Endpoints
-
-## Endpoints
-
-```http
-GET /api/properties/:id
-GET /api/properties/:id/openhouses
+```bash
+curl http://127.0.0.1:5000/api/properties/1174572339/openhouses
 ```
 
-- `:id` is validated against `^[A-Za-z0-9_-]{1,64}$` on both routes; anything
-  else returns `400`.
-- `/api/properties/:id` returns the full property row, or `404` if no
-  property matches that `L_ListingID`.
-- `/api/properties/:id/openhouses` first checks the property exists (`404` if
-  not), then returns its open house rows ordered by date/start time — an
-  empty array is a valid (200) result, not an error.
-- `/:id/openhouses` is registered before `/:id` in `routes/properties.js`, per
-  the general rule that more specific routes should be declared first in
-  Express.
-- Request logging middleware (`server.js`) logs every request's timestamp,
-  method, URL, status code, and duration in ms via `res.on("finish")`.
+**Example response** (`200`)
 
-## Known data issue: `rets_property` / `rets_openhouse` are partly out of sync
+```json
+[
+  {
+    "L_ListingID": "1174572339",
+    "OpenHouseDate": "2026-06-20T07:00:00.000Z",
+    "OH_StartTime": "14:00:00",
+    "OH_EndTime": "16:00:00",
+    "all_data": "{\"OpenHouseType\":\"Public\",\"OpenHouseRemarks\":null, ...}"
+  }
+]
+```
 
-The two dumps were exported at different times, so some open house rows point
-at listings the property dump doesn't contain. Measured against the currently
-imported data:
+A listing with no scheduled open houses returns `200` with `[]` — the property
+exists, it simply has nothing scheduled. `404` is reserved for a listing that
+doesn't exist at all, which the handler checks before querying open houses.
 
-| | rows |
+`all_data` above is abridged — it is a JSON *string* of roughly 45 vendor
+fields that were never given real columns, `OpenHouseRemarks` among them (often
+`null`). The frontend parses it rather than the API flattening it, so a change
+to the vendor payload doesn't require a backend change.
+
+Two shapes the client has to absorb: `OpenHouseDate` is a MySQL `DATE`, which
+mysql2 hands back as a `Date` at the *server's* local midnight and JSON then
+serializes with an offset (`...T07:00:00.000Z` for a PDT host). Formatting it in
+the browser's local timezone can therefore land on the wrong calendar day, so
+`utils/openHouse.js` formats it in UTC. `OH_StartTime` is a plain `"HH:MM:SS"`
+string and is parsed as text rather than routed through `Date`, avoiding the
+same class of shift.
+
+| Status | When |
+| --- | --- |
+| `200` | Listing exists (array may be empty) |
+| `400` | Malformed `id` |
+| `404` | No such listing |
+| `500` | Database error |
+
+---
+
+## Database schema
+
+Database `rets`, two tables, imported from the vendor dumps as-is. Column names
+are RETS field codes, not descriptive names — the mapping below is the part
+worth knowing.
+
+### `rets_property` — 53,122 rows, 126 columns
+
+Primary key `id` (`int`, auto-increment). The columns this application reads:
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `id` | `int` | Surrogate PK; also the default sort and the pagination tiebreaker |
+| `L_ListingID` | `varchar(255)` | MLS listing ID — the public identifier used in URLs |
+| `L_Address` | `varchar(100)` | Street address |
+| `L_City` / `L_State` / `L_Zip` | `varchar` | Location |
+| `L_SystemPrice` | `int` | List price in USD |
+| `L_Keyword2` | `int` | **Bedrooms** |
+| `LM_Dec_3` | `decimal(4,1)` | **Bathrooms** |
+| `LM_Int2_3` | `int` | **Square footage** |
+| `L_Photos` | `longtext` | JSON-encoded array of photo URLs |
+| `LMD_MP_Latitude` / `LMD_MP_Longitude` | `decimal` | Map coordinates |
+| `YearBuilt` | `int` | |
+| `LotSizeAcres` | `decimal(10,4)` | |
+| `ListingContractDate` | `date` | Date listed; a sort option |
+| `L_Remarks` | `mediumtext` | Description shown on the detail page |
+| `L_Type_` | `varchar(50)` | Property type |
+
+`decimal` columns arrive from mysql2 as **strings**, `int` columns as numbers.
+That asymmetry is why `PropertyCard` coerces `LM_Dec_3` through `Number()` and
+why its PropTypes accept `oneOfType([string, number])`.
+
+### `rets_openhouse` — 4,282 rows, 13 columns
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `id` | `int` | PK |
+| `L_ListingID` | `varchar(255)` | Joins to `rets_property.L_ListingID` |
+| `OpenHouseDate` | `date` | |
+| `OH_StartTime` / `OH_EndTime` | `time` | |
+| `all_data` | `longtext` | JSON blob of ungrouped RETS fields (incl. `OpenHouseRemarks`) |
+| `updated_date`, `up_date` | `datetime` / `timestamp` | Feed bookkeeping |
+
+### Relationship
+
+`rets_property` 1 ─── 0..1 `rets_openhouse`, joined on `L_ListingID`. There is
+no foreign key constraint — the dumps are independent exports, and the join
+does not always succeed (see [Known issues](#known-issues-and-future-improvements)).
+
+### Indexes
+
+Every filter and sort column is covered. The ones marked ✚ are added by
+`backend/db/indexes.sql`; the rest ship with the dumps.
+
+| Index | Columns | Serves |
+| --- | --- | --- |
+| `PRIMARY` | `id` | Default ordering, pagination tiebreaker |
+| `idx_L_ListingID` | `L_ListingID` | Detail and open house lookups |
+| `idx_L_City`, `idx_L_Zip` | | Location filters |
+| `idx_L_SystemPrice` ✚ | | Price filter and price sort |
+| `idx_L_Keyword2` ✚, `idx_LM_Dec_3` ✚, `idx_LM_Int2_3` ✚ | | Beds / baths / sqft |
+| `idx_ListingContractDate` ✚ | | Date sort |
+| `idx_city_price` ✚ | `(lower(trim(L_City)), L_SystemPrice)` | The common "city + price range" query, as a functional index matching the `WHERE` clause exactly |
+| `ft_remarks` | `L_Remarks` `FULLTEXT` | Reserved for keyword search (not yet exposed) |
+
+---
+
+## Testing
+
+```bash
+cd backend  && npm test              # 49 tests
+cd frontend && CI=true npm test      # 123 tests
+
+# With coverage (both enforce a 70% floor and fail below it)
+npm run test:coverage
+```
+
+Current coverage:
+
+| | Statements | Branches | Functions | Lines |
+| --- | --- | --- | --- | --- |
+| Backend (`routes/`, `server.js`) | 97.9% | 95.7% | 90.0% | 98.5% |
+| Frontend (`src/`) | 95.9% | 90.9% | 94.4% | 97.7% |
+
+**Backend** tests replace `db/pool` with a `jest.fn()` and drive the real
+Express app through Supertest. They assert on the generated SQL text and the
+bound values, since that — not the row data — is what the route logic actually
+produces. Covered: the paginated envelope, every filter and its validation
+failure, the sort whitelist (including a rejected injection attempt), 404 and
+400 paths on both `:id` routes, and the 500 handler.
+
+**Frontend** tests use React Testing Library and query by role and label rather
+than by class name, so they survive markup changes. Pure logic in `utils/` is
+tested directly; components are tested through the DOM the user sees.
+
+---
+
+## Known issues and future improvements
+
+### The two dumps are partly out of sync
+
+`rets_property.sql` and `rets_openhouse.sql` were exported at different times,
+so some open house rows reference listings the property dump doesn't contain:
+
+| | Rows |
 | --- | --- |
 | `rets_openhouse` total | 4,282 |
-| matching a listing in `rets_property` | 3,541 (82.7%) |
-| orphaned (no such `L_ListingID`) | 741 (17.3%) |
-
-No listing has more than one open house row, and 1,087 of the matching rows
-carry an `OpenHouseRemarks` value. Demo IDs with a property, an open house,
-and remarks: `1174690153`, `1174257622`, `1174068134`.
-
-Re-run the counts after re-importing either dump — these numbers move. An
-earlier revision of this section recorded ~96% orphaned against a much older
-`rets_property.sql`; re-importing the property dump on 2026-08-10 dropped it
-to the 17.3% above and invalidated the demo IDs it listed.
-
-# Week 6 - Filters UI + Unit Testing
-
-## Filter form
-
-`components/PropertyFilters.js` renders the six inputs — city, ZIP code, min
-price, max price, and beds/baths as `<select>` dropdowns. All six are
-controlled by a single `filters` state object updated with the spread operator,
-so one `handleChange` serves every input via its `name` attribute.
-
-`stripEmptyFilters()` drops blank values before the search is handed up to the
-page. This is required, not cosmetic: the backend rejects a present-but-empty
-`city` or `zipcode` with `400 city must not be empty`, so sending `city=""`
-would break an otherwise valid search. It also trims surrounding whitespace.
-`api/client.js` skips empty values a second time when building the query
-string, so neither layer can leak a blank parameter on its own.
-
-`ListingsPage` owns the filter state that drives fetching: `onSearch` replaces
-it and `onClear` resets it to the shared `NO_FILTERS` constant, and a single
-`useEffect` keyed on that object performs every request. Search and Clear
-therefore go through exactly one code path.
-
-## Debug Challenge: stale results flashing after search -> clear -> search
-
-**Symptom.** Type a city, Search, Clear, type a new city, Search — the first
-search's results appear for a moment before the new ones replace them.
-
-**Cause.** Each interaction starts a `fetch` and they resolve in whatever order
-the network returns them, not the order they were sent. The old effect wrote
-every response into state unconditionally, so a slow first-search response
-landing after the third request had been issued still rendered — a flash of
-results for a query the user had already moved on from twice.
-
-**Fix.** `latestRequestRef` in `pages/ListingsPage.js` gives each request an
-incrementing id and records the newest one. Every `.then`/`.catch`/`.finally`
-checks `isStale()` first and returns without touching state if a newer request
-has since started. Only the newest response can render.
-
-`pages/ListingsPage.test.js` pins this down: it hands out one deferred promise
-per request and resolves them deliberately out of order. Removing the
-`isStale()` guards makes that test fail with the stale address on screen, so it
-reproduces the actual bug rather than just asserting current behaviour.
-
-## Tests
-
-```bash
-cd frontend && npm test          # watch mode
-cd frontend && CI=true npm test  # single run
-```
-
-16 tests across three suites:
-
-- `api/client.test.js` — the success path, query-string building with empty
-  values omitted, an API error body, a non-JSON error body, and a network
-  failure.
-- `components/PropertyFilters.test.js` — all six inputs render (beds/baths as
-  dropdowns), only filled-in filters are submitted, all six combine into one
-  search, and Clear resets the form without triggering a search.
-- `pages/ListingsPage.test.js` — initial unfiltered load, filters reaching the
-  API, the empty-results message, Clear reloading everything, the error state,
-  and the out-of-order race above.
-
-### Concepts
-
-**Unit test.** A test of one small piece of code in isolation — a single
-function or component — with its dependencies replaced, so a failure points at
-that piece and nothing else. `stripEmptyFilters` is tested directly on its
-input and output; no browser, network, or database is involved.
-
-**Mocking.** Replacing a real dependency with a stand-in whose behaviour the
-test controls. `jest.fn()` creates such a stub: it records how it was called
-and returns whatever the test tells it to. `ListingsPage.test.js` uses
-`jest.mock("../api/client")` to swap the whole client module out.
-
-**Why mock `fetch()`.** Three reasons. It does not exist in jsdom, so the tests
-would throw without a stand-in. Real requests would make the suite depend on a
-running backend and a populated database, turning it slow and flaky. And error
-paths — a 500, malformed JSON, a dropped connection — are trivial to produce
-from a mock and nearly impossible to trigger on demand against a real server.
-
-# Week 7 - Pagination
-
-## Overview
-
-`ListingsPage` fetches 20 properties (`ITEMS_PER_PAGE` in
-`pages/ListingsPage.js`) at a time and adds a `Pagination` component below
-the grid. `currentPage` state drives `offset = (currentPage - 1) * 20`, sent
-alongside the existing filters and `limit` on every request.
-
-## Behaviour
-
-- Changing pages sends the new `offset` with the *current* filters still
-  attached, and scrolls to top (`window.scrollTo(0, 0)`).
-- Submitting a search or clicking Clear Filters resets `currentPage` to `1`
-  — both `setFilters` and `setCurrentPage(1)` happen in the same handler, so
-  React batches them into the single fetch the new filters need, not two.
-- The results line reads "Showing X-Y of Z properties", computed from
-  `currentPage`, `ITEMS_PER_PAGE`, and the count of properties actually
-  returned (so a partial last page doesn't overstate Y).
-- `Pagination` renders nothing when `totalPages <= 1` — there's nothing to
-  page through and no controls to disable correctly anyway.
-
-## Page number generation (`utils/pagination.js`)
-
-`getPageNumbers(currentPage, totalPages)` always keeps the list format
-`first … [siblings] … last`, with one of the four shapes:
-
-- **fits without ellipsis** — `totalPages` is small enough (`≤ 7` with the
-  default `siblingCount`) that the full list is shorter than a truncated one
-  would be, so nothing is hidden: `[1, 2, 3, 4, 5]`.
-- **near the start** — `[1, 2, 3, 4, 5, …, 24]`.
-- **near the end** — `[1, …, 20, 21, 22, 23, 24]`.
-- **in the middle** — `[1, …, 4, 5, 6, …, 24]`.
-
-An ellipsis is only shown when it hides more than one page — page 2 sitting
-between 1 and 3 is printed, not collapsed into a gap the same width as the
-number it would replace.
-
-## Debug Challenge: "1 … 22 23 24 24" — the last page twice
-
-**Symptom.** Near the end of a large result set, the bar showed the last page
-number twice: `1 … 22 23 24 24`.
-
-**Cause.** The "near the end" branch built its trailing block with
-`range(totalPages - edgeBlockSize + 1, totalPages)` — which already ends in
-`totalPages` — and then appended `totalPages` again after it, on the
-assumption (true for the *other* branches) that the edge value always needed
-adding separately.
-
-**Fix.** `utils/pagination.js` builds that branch as
-`[1, ELLIPSIS, ...range(totalPages - edgeBlockSize + 1, totalPages)]` with no
-trailing append. `utils/pagination.test.js`'s
-`"never repeats a page number, on any page of any size"` test reproduces it:
-it walks every `(currentPage, totalPages)` pair across five different list
-sizes and asserts the numeric pages returned are already a set. Re-adding the
-duplicate append fails that test immediately.
-
-## Tests
-
-`utils/pagination.test.js` covers the four page-number shapes, the
-one-page/zero-page edge cases, the never-repeats regression above, and that
-the current page and both list ends stay present and stable-width across
-every page of a 24-page run. `components/Pagination.test.js` covers Previous/
-Next disabled state on the first and last page, clicking a page number,
-`aria-current` on the active page, the rendered ellipsis, and the "hidden at
-one page" case. `pages/ListingsPage.test.js` adds a `pagination` suite:
-result range text, requesting the right offset on page click, scrolling to
-top, filters surviving a page change, and both search and Clear resetting
-back to page 1 from a later page.
-
-# Week 8 - Property Detail Page, Photos & Map
-
-## Overview
-
-Adds client-side routing and a full property detail page: `react-router-dom`
-now drives navigation between the listings grid and `/property/:id`, cards
-show a photo carousel instead of a single static image, and the detail page
-adds a photo gallery with a lightbox, an embedded Google map, and the open
-house list.
-
-## Routes
-
-```text
-/                 ListingsPage
-/property/:id     PropertyDetailPage
-```
-
-Cards (`components/PropertyCard.js`) are now a `react-router-dom` `Link` to
-`/property/:id` instead of a plain `div`. `PropertyDetailPage` fetches
-`GET /api/properties/:id` and `GET /api/properties/:id/openhouses` (both from
-Week 4) and renders price, address, stats, description, a curated property
-details grid, the photo gallery, the map, and open houses. An invalid or
-unknown id surfaces the API's error message instead of crashing, because the
-fetch is wrapped the same way `ListingsPage` wraps its own request.
-
-### Why `react-router-dom` v6 and not v7
-
-v7 is pinned away from deliberately. It resolves `react-router/dom` through a
-package `exports` map, which the Jest 27 bundled with `react-scripts@5` does
-not read — every suite importing a router died with
-`Cannot find module 'react-router/dom'`, and shimming past that only surfaced
-the next incompatibility (`TextEncoder is not defined`). v6 is built for this
-toolchain and needs no shims. Nothing here uses a v7-only API, so the upgrade
-is a version bump once the build tooling moves off CRA.
-
-Both routers pass `ROUTER_FUTURE_FLAGS` (exported from `App.js`) to opt into
-the two v7 behaviours v6 warns about, which keeps the console and the test
-output clean.
-
-## New components
-
-- `PropertyImageCarousel` (`components/`) — used on cards. Cycles through
-  `L_Photos` with prev/next arrows and an `X / Y` counter; single-photo and
-  no-photo properties fall back to a plain image or a placeholder. Arrow
-  clicks call `stopPropagation()` so they don't trigger the card's `Link`
-  navigation.
-- `PropertyImageGallery` + `Lightbox` (`components/`) — used on the detail
-  page. A large main image with a scrollable thumbnail strip below it;
-  clicking a thumbnail swaps the main image, clicking the main image opens
-  `Lightbox`, a full-screen overlay with its own prev/next controls.
-- `PropertyMap` (`components/`) — a Google Maps Embed API `<iframe>` built
-  from `LMD_MP_Latitude`/`LMD_MP_Longitude`. Renders nothing if either
-  coordinate is missing, and shows a "set the API key" message instead of a
-  broken frame if `REACT_APP_GOOGLE_MAPS_API_KEY` isn't configured. Always
-  renders a "Get Directions" link to Google Maps (`target="_blank"`) since
-  that only needs the coordinates, not the API key.
-- `OpenHouseList` (`components/`) — renders date/time/remarks per open house,
-  or "No open houses scheduled". Use the demo IDs listed in the Week 4 data
-  note to see a populated one; most listings legitimately have none.
-
-Both photo components parse `L_Photos` through the same
-`utils/photos.js::parsePhotos` helper: `JSON.parse` in a `try/catch`,
-falling back to `[]` on failure or a non-array result.
-
-## Google Maps Setup
-
-1. Go to <https://console.cloud.google.com> and sign in.
-2. Create a new project.
-3. **APIs & Services > Library** — enable the **Maps Embed API**.
-4. **APIs & Services > Credentials** — create an API key.
-5. Add it to `frontend/.env` (copy `frontend/.env.example`):
-   ```env
-   REACT_APP_GOOGLE_MAPS_API_KEY=your_key
-   ```
-6. Restrict the key to `localhost:3000` and the Maps Embed API only.
-7. Restart `npm start` — Create React App only reads `REACT_APP_*` variables
-   at startup, so an edit to `.env` needs a restart to take effect.
-
-## Debug Challenge: open house remarks never show up
-
-**Symptom.** Open houses render with the right date and time, but
-`OpenHouseRemarks` is always blank, even for rows that have one in the
-database.
-
-**Cause.** `OpenHouseRemarks` isn't its own column — `rets_openhouse` stores
-it inside the `all_data` JSON blob alongside dozens of other RETS fields.
-Reading `openHouse.OpenHouseRemarks` directly reads `undefined` off the row
-object; the value is one level deeper, behind a second parse.
-
-**Fix.** `utils/openHouse.js::parseOpenHouseRemarks` does
-`JSON.parse(allData).OpenHouseRemarks` in a `try/catch`, in the component
-layer — the API keeps returning `all_data` as-is, per the task's constraint
-not to change the backend.
-
-## Debug Challenge: Escape doesn't close the lightbox
-
-**Symptom.** `Lightbox` has an `onKeyDown` handler that checks for `"Escape"`,
-but pressing the key does nothing.
-
-**Cause.** Keyboard events target whatever element currently has focus, and a
-plain `<div>` can never hold focus — so the keydown never reaches it (or
-anything below it) in the first place, regardless of the handler.
-
-**Fix.** `components/Lightbox.js` gives the overlay `tabIndex={-1}` (focusable
-by script, still skipped by Tab-key navigation) and focuses it with a `ref` in
-a `useEffect` on mount. Once the div holds focus, its `onKeyDown` fires
-normally for Escape and the left/right arrow keys.
-
-## Tests
-
-New suites: `utils/photos.test.js`, `utils/openHouse.test.js`,
-`components/PropertyImageCarousel.test.js`,
-`components/PropertyImageGallery.test.js`, `components/PropertyMap.test.js`,
-`components/OpenHouseList.test.js`, and `pages/PropertyDetailPage.test.js`
-(routing, both fetches, the invalid-id error path, and the two debug
-challenges above).
-
-# Week 9 - Sorting
-
-## Overview
-
-`GET /api/properties` accepts `sortBy` and `sortOrder` alongside the existing
-filters. The listings page adds a single "Sort by" dropdown
-(`components/PropertySort.js`) with paired options — Price, Date Listed,
-Square Footage, Beds, each Low-to-High/High-to-Low or equivalent.
-
-## Backend: the whitelist has to be real column names
-
-`routes/properties.js` interpolates `sortBy` directly into the `ORDER BY`
-clause — column names can't be bound as query placeholders the way values
-can. That makes `SORTABLE_COLUMNS` the only thing standing between the query
-string and SQL injection, which is why it has to be the literal
-`rets_property` columns and nothing friendlier:
-
-```js
-const SORTABLE_COLUMNS = new Set([
-  "L_SystemPrice",       // price
-  "ListingContractDate", // date listed
-  "LM_Int2_3",            // square footage
-  "L_Keyword2",           // beds
-]);
-```
-
-⚠ A RESO-style whitelist entry like `"ListPrice"` would pass a naive
-validator, get interpolated into `ORDER BY ListPrice`, and MySQL would throw
-an unknown-column error — or worse, if the naive validator just skipped
-unrecognized values instead of rejecting them, the query would silently fall
-back to `ORDER BY id` and the response would look fine while being unsorted.
-`sortBy=L_SystemPrice` is what actually sorts by price; `sortBy=ListPrice` is
-rejected with `400`.
-
-`sortOrder` is checked against `{"asc", "desc"}` (case-insensitive) with the
-same reasoning. Both checks run alongside the other query-parameter
-validation already in the handler, before the `400` short-circuit — so an
-invalid `sortBy` or `sortOrder` never reaches query construction.
-
-When a sort is requested, the `ORDER BY` clause appends `, id ASC` as a
-tiebreaker:
-
-```js
-const orderByClause =
-  sortBy !== undefined ? `ORDER BY ${sortBy} ${sortOrder ?? "asc"}, id ASC` : "ORDER BY id";
-```
-
-Without it, rows tied on the sort column (thousands of listings share a
-`L_SystemPrice`) have no guaranteed order between two paginated requests —
-the same row could appear on both page 1 and page 2, or neither, depending on
-how MySQL happens to resolve the tie that time. `id` is a primary key, so it
-breaks every tie the same way on every request.
-
-Verified directly against the running database:
-
-```bash
-curl "http://127.0.0.1:5000/api/properties?limit=5&sortBy=L_SystemPrice&sortOrder=asc"
-curl "http://127.0.0.1:5000/api/properties?sortBy=ListPrice"   # 400, real column required
-curl "http://127.0.0.1:5000/api/properties?sortBy=id;DROP%20TABLE%20rets_property;--"  # 400
-```
-
-The injection attempt is rejected by the same whitelist check as any other
-invalid value — it never gets close to the query.
-
-## Frontend: sort vs. filter state
-
-`pages/ListingsPage.js` keeps `sort` (`{ sortBy, sortOrder }`) as its own
-piece of state, separate from `filters` — they have different reset rules
-and conflating them would make either rule leak into the other:
-
-- Changing pages leaves `sort` untouched — it's in the fetch effect's
-  dependency array alongside `filters` and `currentPage`, so paging fetches
-  the next offset with the same sort still applied.
-- Submitting a search or clicking Clear Filters resets `sort` to
-  `{ sortBy: "", sortOrder: "" }` in the same handler that resets
-  `filters`/`currentPage`, so React batches all three into one fetch rather
-  than firing twice.
-- Picking a new sort resets `currentPage` to 1 (not `filters`), so a re-sort
-  doesn't strand the user on a page number that may no longer exist for the
-  new order.
-
-`PropertySort`'s options carry both pieces at once (`value="L_SystemPrice:asc"`)
-so "Price: Low to High" and "Price: High to Low" are just two different
-selections of the same field rather than needing a second control to combine
-with.
-
-## Tests
-
-Backend: no test framework is set up for it yet (see Week 1-4, verified by
-`curl` against the running server, same as above) — 400s on an invalid
-`sortBy`/`sortOrder`, correct ordering for all four fields in both
-directions, and no `L_ListingID` overlap between two consecutive pages of a
-sorted, paginated request.
-
-Frontend: `components/PropertySort.test.js` (every option maps to the right
-`sortBy`/`sortOrder` pair, Default clears both) and a new `sorting` suite in
-`pages/ListingsPage.test.js` (sort included in the fetch params, persists
-across a page change, resets `currentPage` to 1 when the sort changes, and
-resets to Default on both search and Clear Filters).
-
-# Week 9 - Performance Optimization
-
-## Reading EXPLAIN
-
-`EXPLAIN` prefixed to a `SELECT` makes MySQL return its **execution plan**
-instead of running the query — which index it intends to use, how many rows it
-expects to touch, and whether it has to sort the result itself.
-`EXPLAIN ANALYZE` goes further: it actually runs the query and reports the real
-time spent at each step, which is what the before/after numbers below come from.
-
-The query profiled here is the most complex one the app can produce — all four
-filters plus a sort plus pagination:
-
-```sql
-EXPLAIN SELECT L_ListingID, L_Address, L_City, L_SystemPrice, L_Keyword2, LM_Dec_3, LM_Int2_3
-FROM rets_property
-WHERE LOWER(TRIM(L_City)) = LOWER(TRIM('Beverly Hills'))
-  AND L_SystemPrice >= 500000 AND L_SystemPrice <= 5000000
-  AND L_Keyword2 >= 3 AND LM_Dec_3 >= 2
-ORDER BY L_SystemPrice ASC, id ASC
-LIMIT 20 OFFSET 0;
-```
-
-Before any index existed on the filter columns:
-
-```
-           id: 1
-  select_type: SIMPLE
-        table: rets_property
-   partitions: NULL
-         type: ALL
-possible_keys: NULL
-          key: NULL
-      key_len: NULL
-          ref: NULL
-         rows: 35353
-     filtered: 1.23
-        Extra: Using where; Using filesort
-```
-
-What each column means, and what this row is saying:
-
-| Column | Meaning | Reading above |
-| --- | --- | --- |
-| `id` | Which `SELECT` in the statement this row describes | `1` — a single, non-nested query |
-| `select_type` | The role of that `SELECT` (subquery, union, derived table…) | `SIMPLE` — no subqueries or unions |
-| `table` | The table this row is about | `rets_property` |
-| `partitions` | Partitions that will be searched | `NULL` — the table isn't partitioned |
-| `type` | **The access method.** Worst to best: `ALL` (read every row) → `index` (read the whole index) → `range` (walk a slice of an index) → `ref` → `eq_ref` → `const` | `ALL` — a full table scan |
-| `possible_keys` | Indexes the optimizer *could* have used | `NULL` — none exist for these columns |
-| `key` | The index actually chosen | `NULL` — no index used |
-| `key_len` | Bytes of the index used. On a composite index this reveals **how many leading columns** are in play | `NULL` |
-| `ref` | What the indexed column is compared against (a constant, another column…) | `NULL` |
-| `rows` | Estimated rows MySQL will examine | `35353` — most of the 53,122-row table |
-| `filtered` | Estimated % of those rows surviving `WHERE` | `1.23` — 35353 × 1.23% ≈ 435 rows expected out |
-| `Extra` | Everything else. `Using where` = rows are filtered after being read; `Using index` = covering index, no table lookup needed; **`Using filesort`** = the `ORDER BY` can't be served by an index, so the whole result set is sorted separately; `Using temporary` = an internal temp table is built | `Using where; Using filesort` — both of the slow ones |
-
-`EXPLAIN ANALYZE` confirmed the estimate: a table scan of all 53,122 rows,
-**557 ms**, to return 20 listings.
-
-## Composite indexes
-
-Two indexes carry this query (see `backend/db/indexes.sql`):
-
-`idx_city_price` — a **functional composite** on
-`((LOWER(TRIM(L_City))), L_SystemPrice)`. It has to be built on the expression,
-not the bare column: once the query wraps `L_City` in `LOWER(TRIM(...))`, a
-plain index on `L_City` is unusable, because the optimizer has no way to know
-the function preserves ordering. The column order matters too — city is an
-equality match and price is a range, and a composite index can only use a range
-on its *last* referenced column, so `(city, price)` works while `(price, city)`
-would stop at the price range.
-
-The same index also serves the `ORDER BY`: rows for one city are already stored
-in price order inside it, so there is nothing left to sort.
-
-After adding it:
-
-```
-         type: range
-possible_keys: idx_L_SystemPrice,idx_L_Keyword2,idx_LM_Dec_3,idx_city_price
-          key: idx_city_price
-      key_len: 208
-          ref: NULL
-         rows: 116
-     filtered: 25.00
-        Extra: Using where
-```
-
-`type` went `ALL` → `range`, `key` is no longer `NULL`, `rows` fell from 35,353
-to 116, and `Using filesort` is gone. `EXPLAIN ANALYZE`: **557 ms → 4.3 ms**,
-roughly a **130×** improvement.
-
-## The DESC sort was still doing a filesort
-
-An unfiltered sort — what the listings page issues when the user picks a sort
-with no filters — told a different story. `ORDER BY L_SystemPrice ASC, id ASC`
-was an index scan (0.9 ms), but `ORDER BY L_SystemPrice DESC, id ASC` was a full
-scan plus filesort (**634 ms**), *despite* `idx_L_SystemPrice` existing.
-
-The reason is that InnoDB appends the primary key to every secondary index, so
-`idx_L_SystemPrice` is physically `(L_SystemPrice, id)`, both ascending. MySQL
-can read any index forwards or backwards, which covers `price ASC, id ASC` and
-`price DESC, id DESC` — but `price DESC, id ASC` matches neither direction, so
-the optimizer abandons the index and sorts all 53k rows.
-
-The fix was in the query, not the schema: `routes/properties.js` now makes the
-`id` tiebreaker follow `sortOrder` instead of pinning it to `ASC`.
-
-```js
-const resolvedOrder = sortOrder ?? "asc";
-`ORDER BY ${sortBy} ${resolvedOrder}, id ${resolvedOrder}`
-```
-
-`id` is unique, so this is exactly as deterministic for pagination as `id ASC`
-was — verified again by checking that two consecutive pages of a
-`sortOrder=desc` request share no `L_ListingID`. The plan becomes a reverse
-index scan: **634 ms → 2.8 ms**.
-
-Two more indexes (`idx_ListingContractDate`, `idx_LM_Int2_3`) cover the sort
-columns that weren't already indexed as filter columns. With those, all eight
-combinations the sort dropdown can produce run as index scans — the slowest is
-0.8 ms. Without the tiebreaker fix this would have needed eight indexes, four of
-them explicitly `DESC`.
-
-| Sort | Before | After |
-| --- | --- | --- |
-| 4 filters + price ASC | 557 ms, filesort | 4.3 ms, `range` on `idx_city_price` |
-| price DESC (no filter) | 634 ms, filesort | 2.8 ms, reverse index scan |
-| date listed DESC | 520 ms, filesort | 0.19 ms, reverse index scan |
-| square footage DESC | 643 ms, filesort | 0.81 ms, reverse index scan |
-| beds DESC | 619 ms, filesort | 0.48 ms, reverse index scan |
-
-Note: `backend/db/indexes.sql` is not run automatically. Re-importing
-`rets_property.sql` drops these indexes with the table, and the symptom is
-exactly the "before" column above.
-
-## Request timing
-
-The logging middleware in `server.js` brackets each request with
-`process.hrtime.bigint()` (nanosecond resolution, unaffected by wall-clock
-adjustments) and logs on the response's `finish` event, so the number covers the
-full handler including the database round trip:
-
-```
-[2026-08-17T06:28:15.412Z] GET /api/properties?city=Beverly+Hills&sortBy=L_SystemPrice 200 5.8ms
-```
-
-## Error boundary
-
-`components/ErrorBoundary.js` wraps the routed content in `App.js`. It has to be
-a class component — `componentDidCatch` has no hook equivalent.
-
-- `getDerivedStateFromError` runs in the render phase and only swaps in the
-  fallback UI; it must stay pure, so logging lives in `componentDidCatch`.
-- The fallback offers **Try again** (clears the error state and re-renders the
-  children, which recovers from transient failures without losing the SPA) and
-  **Reload page** as the fallback of the fallback.
-- The boundary is keyed on `location.pathname`. Error state survives re-renders,
-  so without the key a boundary tripped on the detail page would keep showing
-  its fallback after the user navigated home.
-
-It catches errors thrown during render, in lifecycle methods, and in
-constructors. It does **not** catch errors in event handlers, in async code, or
-during server rendering — the `fetch` failures in `ListingsPage` are still
-handled by their own `try`/`catch`, and the two mechanisms are complementary
-rather than redundant.
-
-Tested in `components/ErrorBoundary.test.js`: children render normally when
-nothing throws, the fallback replaces them when something does, the error is
-logged, and **Try again** restores the children.
-
-## Console warnings
-
-`npm run build` compiles with no ESLint warnings, and the 114-test suite runs
-without React warnings in its output. The two sources that had been noisy are
-already handled: `App.js` opts into `v7_startTransition` and
-`v7_relativeSplatPath` so react-router v6 stops warning about v7 behaviour
-changes, and every list render supplies a `key`.
-
-The `DeprecationWarning` lines in `logs/frontend.log` (`fs.F_OK`,
-`onAfterSetupMiddleware`, `util._extend`) come from webpack-dev-server's own
-Node dependencies, not from application code — they are not fixable from this
-repo and do not appear in the browser console.
+| Matching a listing in `rets_property` | 3,541 (82.7%) |
+| Orphaned (no such `L_ListingID`) | 741 (17.3%) |
+
+No listing has more than one open house row. These numbers move whenever
+either dump is re-imported — an earlier import had ~96% orphaned. Listing IDs
+useful for demoing the open house section: `1174572339`, `1174210217`,
+`1173331946`.
+
+### Other known issues
+
+- **No text search.** The `ft_remarks` FULLTEXT index exists but no endpoint
+  uses it; there is no keyword or address search yet.
+- **`SELECT *` on the detail endpoint** ships all 126 columns when the page
+  renders about 15. Harmless at one row per request, but wasteful.
+- **Offset pagination degrades at depth.** `LIMIT 20 OFFSET 50000` still makes
+  MySQL walk 50,020 rows. Fine for the ~2,600 pages here; keyset pagination
+  would be the fix at a larger scale.
+- **No caching.** Every request hits the database, including identical repeat
+  searches.
+- **The map needs a Google API key** that isn't in the repository, so the
+  detail page map is a placeholder for anyone who hasn't set one up.
+- **Read-only.** There are no write endpoints, no authentication, and no
+  per-user state such as saved searches or favorites.
+
+### Future improvements
+
+- Keyword search over `L_Remarks` and `L_Address` using the FULLTEXT index
+- Map-based search: draw a bounding box, filter on lat/long
+- Server-side response caching for popular filter combinations
+- Restrict the detail query to the columns the page actually renders
+- Saved searches and favorites, which would require auth and a user table
+- A CI workflow running both suites and the linter on every pull request
+
+---
+
+## Further reading
+
+[`docs/weekly-notes.md`](docs/weekly-notes.md) — the week-by-week build log,
+including the debugging write-ups (the stale-results race, the duplicated last
+page in the pagination bar, the `DESC` sort that triggered a filesort) and the
+`EXPLAIN` output behind the index choices.
