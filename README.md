@@ -543,3 +543,9 @@ useful for demoing the open house section: `1174572339`, `1174210217`,
 including the debugging write-ups (the stale-results race, the duplicated last
 page in the pagination bar, the `DESC` sort that triggered a filesort) and the
 `EXPLAIN` output behind the index choices.
+
+[`docs/architecture.md`](docs/architecture.md) — system overview, the request
+lifecycle from click to SQL and back, component tree, state ownership, and the
+data model with the indexes and the data problems each piece of code absorbs.
+
+[`docs/presentation.md`](docs/presentation.md) — the final demo script.
